@@ -25,6 +25,28 @@
 
 ---
 
+## 0.5 最快路径(本机已装 GitHub CLI,推荐)
+
+这台机器已经装了 `gh`(GitHub CLI 2.97),本地仓库也已经初始化并提交好了,
+所以只需要两步:
+
+```powershell
+# ① 登录(只需一次;当前默认账号 DengZhan05 的 token 已失效)
+gh auth login          # 选 GitHub.com → HTTPS → Login with a web browser
+
+# ② 一条命令:建仓库 + 关联 + 推送
+cd E:\workspace\A3-manager
+gh repo create A3-manager --private --source=. --push
+```
+
+- 想建公开仓库就把 `--private` 换成 `--public`
+- 想换个账号:`gh auth logout -u DengZhan05` 之后再 `gh auth login`
+- 之后更新代码只要 `git add -A && git commit -m "..." && git push`
+
+下面的第 1~5 节是**不依赖 gh 的手动流程**,两条路选一条即可。
+
+---
+
 ## 1. 安装并配置 Git
 
 ```powershell
