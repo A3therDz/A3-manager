@@ -59,12 +59,16 @@ function migrateLegacyUserData(): void {
 migrateLegacyUserData();
 
 /** 应用设置(见 shared/types.ts 的 AppSettings)。closeToTray 决定关闭按钮的行为 */
+/** 设置结构版本:用来把"新默认值"只推一次给老用户(见下面的迁移) */
+const CONFIG_VERSION = 2;
+
 let settings: {
   closeToTray: boolean;
   theme: 'dark' | 'light';
   reduceEffects: boolean;
   backgroundImage: string | null;
   backgroundFit: 'cover' | 'stretch' | 'contain' | 'tile';
+  configVersion: number;
 } = {
   closeToTray: true,
   // 默认亮色 + 磨砂(reduceEffects=false);用户可在设置里改
@@ -72,11 +76,21 @@ let settings: {
   reduceEffects: false,
   backgroundImage: null,
   backgroundFit: 'cover',
+  configVersion: CONFIG_VERSION,
 };
 try {
   settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
 } catch {
   /* 首次运行没有文件,用默认值 */
+}
+
+// —— 配置迁移 ——
+// v1 及更早的默认主题是暗色,老配置里存的就是那个旧默认值;这里把它改成新的默认(亮色),
+// 只做一次:之后用户自己再切回暗色,会被 configVersion=2 记住,不会再被覆盖。
+if ((settings.configVersion ?? 0) < 2) {
+  settings.theme = 'light';
+  settings.configVersion = CONFIG_VERSION;
+  saveSettings();
 }
 
 function saveSettings(): void {
