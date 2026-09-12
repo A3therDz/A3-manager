@@ -371,6 +371,8 @@ style.textContent = `
 document.head.appendChild(style);
 
 // 主题:挂载前就从 localStorage 恢复,避免闪烁
-document.documentElement.dataset.theme = localStorage.getItem('cam-theme') === 'light' ? 'light' : 'dark';
+// 默认亮色:只有用户显式选过暗色才用暗色
+const savedTheme = localStorage.getItem('cam-theme');
+document.documentElement.dataset.theme = savedTheme === 'dark' ? 'dark' : 'light';
 
 createRoot(el).render(<App />);

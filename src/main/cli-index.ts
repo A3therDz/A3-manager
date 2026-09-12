@@ -127,7 +127,7 @@ switch (cmd) {
     }
     console.log(`${C.bold}开始扫描${C.reset}${force ? ' ' + C.yellow + '(强制全量)' + C.reset : ''}`);
     let last = 0;
-    const r = scanLibrary(db, {
+    const r = await scanLibrary(db, {
       force,
       rootIds: rootIdArg ? [Number(rootIdArg)] : undefined,
       onProgress: (p) => {

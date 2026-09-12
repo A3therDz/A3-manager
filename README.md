@@ -8,42 +8,44 @@
 ---
 
 ## 快速使用
+
 - 在release安装，解压后直接点击A3 manager.exe即可
 
 ## 功能
 
 **浏览与检索**
+
 - 缩略图网格 + 无限滚动;缩略图缓存在图库内的 `.comfy-thumbs\`(只读原图,绝不搬动)
 - 按文件夹树浏览,支持多图库目录、任意盘
 - 全文检索:文件名 / 提示词 / 模型 / LoRA / 文件夹
 - 按模型、排序(最新/最早/名称/体积/随机)、只看收藏筛选
 
 **详情**
+
 - 完整生成参数:像素尺寸、模型、调度器、步数、CFG、seed、LoRA 及权重、正/负提示词
 - ← → 翻页、Esc 关闭、`/` 聚焦搜索
 
 **整理**
+
 - 卡片右键:重命名(真改文件名并同步索引)、复制图片(到剪贴板)、复制到文件夹、移动到文件夹、在资源管理器中定位、删除(进回收站)
 - 多选(Ctrl / Shift / 勾选框)+ 底部批量操作条:批量移动 / 批量删除
 - 用户自定义分类:跨文件夹把图片归到同一集合,支持层级与重名保护
 - 图库目录里新出的图**自动入库**(文件监听 + 去抖,几秒内出现)
 
-
 **元数据格式支持**
 
-| 格式 | 识别字段 |
-|---|---|
-| ComfyUI 节点图(prompt) | 模型 / LoRA / 采样器 / 步数 / CFG / seed / 正负提示词 |
-| ComfyUI UI 工作流(workflow) | 同上(从 `widgets_values` 取值) |
-| A1111 WebUI(parameters) | Steps / Sampler / Schedule type / CFG scale / Seed / Model / Lora hashes… |
-| NovelAI(Comment + Description) | prompt / uc / steps / sampler / scale / seed / noise_schedule / 模型(Source) |
+| 格式                             | 识别字段                                                                        |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| ComfyUI 节点图(prompt)            | 模型 / LoRA / 采样器 / 步数 / CFG / seed / 正负提示词                                   |
+| ComfyUI UI 工作流(workflow)       | 同上(从 `widgets_values` 取值)                                                   |
+| A1111 WebUI(parameters)        | Steps / Sampler / Schedule type / CFG scale / Seed / Model / Lora hashes…   |
+| NovelAI(Comment + Description) | prompt / uc / steps / sampler / scale / seed / noise\_schedule / 模型(Source) |
 
 ---
 
 ## 快速开始(开发)
 
 需要 **Node 22+**(用到内置 `node:sqlite`)。
-
 ```bash
 npm install          # 首次
 npm run typecheck    # 类型检查,应 0 错误
@@ -53,7 +55,6 @@ npm run package      # 打绿色版 + NSIS 安装包
 ```
 
 纯浏览器调试(需要另开一个零依赖 API 服务;桌面版不需要):
-
 ```bash
 node --experimental-strip-types src/server/index.ts --port 5174 --root "<你的图库目录>"
 npm run dev
@@ -62,8 +63,7 @@ npm run dev
 ---
 
 ## 目录结构
-
-```
+```css
 src/
   main/        Electron 主进程 + 索引库(node:sqlite) + 扫描器
   preload/     contextBridge 桥(把主进程能力暴露成 window.api)
@@ -79,9 +79,6 @@ docs/          开发任务书
 
 ---
 
-
 ## 作者
 
-**A3ther** · 仓库:<https://github.com/dashboard>
-
-
+**A3ther** · 仓库:[https://github.com/dashboard](https://github.com/dashboard)

@@ -120,7 +120,12 @@ function walkImages(rootDir: string, signal?: AbortSignal): string[] {
  * Synchronous by design (sync IO + node:sqlite sync API) so the Electron main
  * process can host it inside a worker without touching the UI thread.
  */
-export function scanLibrary(db: AssetDb, opts: ScanOptions = {}): ScanResult {
+/** 把控制权还给事件循环 —— 扫描期间窗口必须还能响应,否则 Windows 会显示"未响应" */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+export async function scanLibrary(db: AssetDb, opts: ScanOptions = {}): Promise<ScanResult> {
   const startedAt = Date.now();
   const batchSize = opts.batchSize === undefined ? 200 : opts.batchSize;
   const progress: ScanProgress = {
@@ -166,6 +171,8 @@ export function scanLibrary(db: AssetDb, opts: ScanOptions = {}): ScanResult {
     progress.total += files.length;
     progress.phase = 'parsing';
     emit();
+    // 目录遍历本身是同步的,大图库也要在这里让一次
+    await yieldToEventLoop();
 
     const fingerprints = opts.force ? new Map() : db.loadFingerprints(root.id);
     const seen = new Set<string>();
@@ -271,9 +278,12 @@ export function scanLibrary(db: AssetDb, opts: ScanOptions = {}): ScanResult {
 
       progress.processed++;
       if (progress.processed % 200 === 0) emit();
+      // 每 50 个文件让出一次:扫描几千张图时主进程仍能处理界面消息
+      if (progress.processed % 50 === 0) await yieldToEventLoop();
     }
 
     flush();
+    await yieldToEventLoop();
     removed += db.deleteImagesNotIn(root.id, seen);
     db.markRootScanned(root.id);
   }

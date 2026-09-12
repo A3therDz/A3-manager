@@ -89,7 +89,7 @@ for (let i = 0; i < picked.length; i++) {
 {
   const db = new AssetDb(DB);
   db.addRoot(ROOT);
-  const r = scanLibrary(db, { force: true });
+  const r = await scanLibrary(db, { force: true });
   console.log(`索引: 发现 ${r.scanned}, 入库 ${r.indexed}, 错误 ${r.errors}`);
   check(r.indexed === picked.length, `索引入库数 = 复制数 (${r.indexed}/${picked.length})`);
   check(!fs.existsSync(path.join(ROOT, THUMB_DIRNAME)), '生成缩略图前 .comfy-thumbs 不存在');

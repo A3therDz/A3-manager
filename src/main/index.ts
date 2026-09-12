@@ -67,7 +67,8 @@ let settings: {
   backgroundFit: 'cover' | 'stretch' | 'contain' | 'tile';
 } = {
   closeToTray: true,
-  theme: 'dark',
+  // 默认亮色 + 磨砂(reduceEffects=false);用户可在设置里改
+  theme: 'light',
   reduceEffects: false,
   backgroundImage: null,
   backgroundFit: 'cover',
@@ -315,7 +316,7 @@ async function runScan(opts: { rootIds?: number[]; force?: boolean }): Promise<v
   if (scanAbort) return; // 已在扫描
   scanAbort = new AbortController();
   try {
-    scanLibrary(db, {
+    await scanLibrary(db, {
       rootIds: opts.rootIds,
       force: opts.force,
       signal: scanAbort.signal,
@@ -373,6 +374,33 @@ function thumbDirOf(rootPath: string): string {
  * 两者写入**同一个缓存位置**,所以谁先生成都算数,不会互相覆盖出两份。
  * 代价:大 PNG 解码一次约几百毫秒,所以只在首次请求时做,不要批量预生成。
  */
+/**
+ * 缩略图生成限流:网格一屏可能有 120 张,若同时解码大图会把主进程占满。
+ * 这里最多同时生成 2 张,且每张之后让出一帧,保证界面不卡。
+ */
+const THUMB_CONCURRENCY = 2;
+let thumbActive = 0;
+const thumbWaiters: Array<() => void> = [];
+
+async function acquireThumbSlot(): Promise<void> {
+  if (thumbActive < THUMB_CONCURRENCY) {
+    thumbActive++;
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    thumbWaiters.push(() => {
+      thumbActive++;
+      resolve();
+    });
+  });
+}
+
+function releaseThumbSlot(): void {
+  thumbActive = Math.max(0, thumbActive - 1);
+  const next = thumbWaiters.shift();
+  if (next) next();
+}
+
 async function ensureThumb(id: number): Promise<string | null> {
   const row = db.getImageRow(id);
   if (!row) return null;
@@ -391,6 +419,7 @@ async function ensureThumb(id: number): Promise<string | null> {
     /* 还没生成,继续 */
   }
 
+  await acquireThumbSlot();
   try {
     const img = nativeImage.createFromPath(absPath);
     if (img.isEmpty()) return null;
@@ -406,6 +435,10 @@ async function ensureThumb(id: number): Promise<string | null> {
   } catch {
     // 生成失败(比如图库目录只读)—— 返回 null,由调用方回退原图
     return null;
+  } finally {
+    releaseThumbSlot();
+    // 让出一帧,避免连续解码把主线程占死
+    await new Promise((r) => setImmediate(r));
   }
 }
 

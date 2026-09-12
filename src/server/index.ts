@@ -71,11 +71,11 @@ function broadcast(p: ScanProgress): void {
   }
 }
 
-function runScan(opts: { rootIds?: number[]; force?: boolean }): void {
+async function runScan(opts: { rootIds?: number[]; force?: boolean }): Promise<void> {
   if (scanAbort) return;
   scanAbort = new AbortController();
   try {
-    scanLibrary(db, {
+    await scanLibrary(db, {
       rootIds: opts.rootIds,
       force: opts.force,
       signal: scanAbort.signal,
@@ -285,7 +285,8 @@ route('POST', '/api/roots/:id/enabled', async (req, res, _url, p) => {
 route('POST', '/api/scan', async (req, res) => {
   if (scanAbort) return ok(res, { started: false, reason: 'scan already running' });
   const body = (await readJsonBody(req)) as { rootIds?: number[]; force?: boolean };
-  runScan({ rootIds: body.rootIds, force: body.force });
+
+  void runScan({ rootIds: body.rootIds, force: body.force });
   ok(res, { started: true });
 });
 

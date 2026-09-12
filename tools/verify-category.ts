@@ -62,7 +62,7 @@ console.log('');
 {
   const db = new AssetDb(TMP_DB);
   db.addRoot(TMP_ROOT);
-  scanLibrary(db, { force: true });
+  await scanLibrary(db, { force: true });
   console.log(`索引: ${db.count()} 张\n`);
   db.close();
 }
