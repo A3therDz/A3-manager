@@ -1,0 +1,67 @@
+name: 报告 Bug
+description: 遇到异常、报错、界面问题都用这个
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈!为了能快速定位,请把下面几项填清楚。
+        如果方便,截一张图往往比文字更快定位问题。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 在应用「设置」底部或 exe 文件名上可以找到(例如 v0.1.0)
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: effects
+    attributes:
+      label: 渲染效果
+      description: 设置 → 渲染效果里的选项
+      options:
+        - 磨砂
+        - 平面
+        - 不确定
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: 系统环境
+      placeholder: Windows 11 23H2 / 显卡型号 / 是否远程桌面
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从启动开始,尽量写清楚点了哪里、做了什么
+      placeholder: |
+        1. 打开 A3 manager
+        2. 设置 → 添加图库文件夹 → 选中 xxx
+        3. 右键某张图 → 移动…
+        4. 出现报错
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果(有报错原文请原样贴上)
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息(可选)
+      description: 图库规模、图片格式(ComfyUI / A1111 / NovelAI)、截图链接等
+    validations:
+      required: false
