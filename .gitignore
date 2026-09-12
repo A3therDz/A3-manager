@@ -25,3 +25,7 @@ Thumbs.db
 *.zip
 *.exe
 !build/icon.ico
+
+# 内部上传说明(不随仓库发布)
+PUBLISH-TO-GITHUB.md
+
