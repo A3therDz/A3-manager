@@ -97,6 +97,40 @@ function saveSettings(): void {
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }
 
+
+/**
+ * 把旧应用名目录(%APPDATA%\\ComfyUI 资产管理器)里登记的图库"补登记"到当前库。
+ *
+ * 为什么需要:应用改名后数据目录跟着变,如果用户一会儿开旧版一会儿开新版,
+ * 就会觉得"新加的图库重启后不见了"。这里只做补登记(不搬索引),
+ * 缺的图片会在随后的扫描里补回来;已经存在的图库按路径去重。
+ */
+function mergeLegacyRoots(): void {
+  try {
+    const legacyDb = path.join(app.getPath('appData'), 'ComfyUI 资产管理器', 'data', 'index.db');
+    if (!fs.existsSync(legacyDb) || legacyDb === DB_FILE) return;
+    // 用只读连接读旧库,避免影响它
+    const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
+    const old = new DatabaseSync(legacyDb, { readOnly: true });
+    const rows = old.prepare('SELECT path, label FROM roots').all() as Array<{ path: string; label: string }>;
+    old.close();
+    const mine = new Set((db.listRoots() as Array<{ path: string }>).map((r) => r.path.toLowerCase()));
+    let added = 0;
+    for (const r of rows) {
+      if (!r.path || mine.has(r.path.toLowerCase())) continue;
+      if (!fs.existsSync(r.path)) continue; // 盘子没了就别登记
+      db.addRoot(r.path, r.label);
+      added++;
+    }
+    if (added > 0) {
+      console.log('[migrate] 从旧数据目录补登记了', added, '个图库');
+      void runScan({});
+    }
+  } catch (e) {
+    console.error('[migrate] 补登记旧图库失败(忽略):', e);
+  }
+}
+
 function ensureDirs(): void {
   // 缩略图不再写到管理器目录:它们放在每个图库根目录内部(见 THUMB_DIRNAME),
   // 所以这里只需要保证自己的数据目录存在。
@@ -886,6 +920,7 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     ensureDirs();
     db = new AssetDb(DB_FILE);
+    mergeLegacyRoots();
     syncRootWatchers();
     registerThumbProtocol();
     registerBackgroundProtocol();
