@@ -1,0 +1,27 @@
+# 依赖与构建产物
+node_modules/
+dist/
+release/
+release-*/
+app/
+
+# 本地数据(索引库/设置/临时)
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+qa-profile/
+.tmp-*/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 打包产物
+*.7z
+*.zip
+*.exe
+!build/icon.ico

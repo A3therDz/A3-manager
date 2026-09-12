@@ -1,0 +1,70 @@
+{
+  "name": "comfy-asset-manager",
+  "productName": "A3 manager",
+  "version": "0.1.0",
+  "description": "A3 manager —— 本地图片资产管理器(ComfyUI / A1111 / NovelAI):文件夹浏览、缩略图网格、完整生成参数",
+  "private": true,
+  "type": "module",
+  "main": "dist/main/index.mjs",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "doctor": "node --experimental-strip-types tools/doctor.ts",
+    "serve": "node --experimental-strip-types src/server/index.ts",
+    "webui": "node --experimental-strip-types tools/serve-webui.ts",
+    "portable": "node --experimental-strip-types tools/build-portable.ts",
+    "index": "node --experimental-strip-types src/main/cli-index.ts",
+    "thumbs": "node --experimental-strip-types tools/thumb-sync.ts",
+    "gallery": "node --experimental-strip-types tools/export-gallery.ts",
+    "inspect": "node tools/inspect.js",
+    "verify": "node --experimental-strip-types tools/verify-syntax.ts && node --experimental-strip-types tools/verify-contract.ts && node --experimental-strip-types tools/verify-category.ts && node --experimental-strip-types tools/verify-thumb-e2e.ts && node --experimental-strip-types tools/verify-webpage.ts",
+    "verify:http": "node --experimental-strip-types tools/verify-http.ts",
+    "verify:manage": "node --experimental-strip-types tools/verify-manage.ts",
+    "dev": "vite",
+    "build:renderer": "vite build",
+    "build:main": "vite build --config vite.main.config.ts",
+    "build": "npm run build:main && npm run build:renderer",
+    "typecheck": "tsc --noEmit",
+    "start": "npm run build && electron .",
+    "package": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  },
+  "build": {
+    "appId": "com.comfyasset.manager",
+    "productName": "A3 manager",
+    "directories": { "output": "release" },
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "build/tray.png",
+      "tools/comfy-parser.cjs",
+      "tools/png-reader.cjs"
+    ],
+    "electronDist": "node_modules/electron/dist",
+    "electronLanguages": ["zh-CN", "en-US"],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "artifactName": "${productName}-${version}-setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}
