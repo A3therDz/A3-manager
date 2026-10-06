@@ -488,6 +488,15 @@ export interface ApiSurface {
   copyImageWithoutMetadata(id: number): Promise<void>;
   /** 复制一份到指定文件夹(原图保留);用户取消返回 null */
   copyImageToFolder(id: number): Promise<{ copiedTo: string } | null>;
+  /**
+   * 批量复制到文件夹:只弹一次目录选择框,原图保留、索引不变。
+   * targetDir 传了就跳过对话框(供批量操作与自动化验证用);
+   * 同名文件跳过计入 skipped,用户取消时 target 为 null。
+   */
+  copyImagesToFolder(
+    ids: number[],
+    targetDir?: string
+  ): Promise<{ copied: number; skipped: number; target: string | null; errors: string[] }>;
   /** 批量删除:全部移入回收站并清索引 */
   deleteImages(ids: number[]): Promise<{ deleted: number; errors: string[] }>;
   /**

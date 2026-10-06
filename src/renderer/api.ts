@@ -134,6 +134,7 @@ function createHttpApi(): ApiSurface {
     copyImageToFolder: () => desktopOnly('复制图片到文件夹'),
     deleteImages: () => desktopOnly('批量删除'),
     moveImages: () => desktopOnly('批量移动'),
+    copyImagesToFolder: () => desktopOnly('批量复制'),
 
     // 设置:浏览器版用 localStorage 兜底(只影响界面,不影响托盘行为)
     getSettings: () => {

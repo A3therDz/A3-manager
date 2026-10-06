@@ -1123,6 +1123,40 @@ function registerIpc(): void {
     return { copiedTo: target };
   });
 
+  /** 批量复制:选一次目录,逐文件复制;同名跳过,原图与索引都不动 */
+  handle('copyImagesToFolder', async (ids: number[], targetDir?: string) => {
+    let dir = targetDir;
+    if (!dir) {
+      const picked = await dialog.showOpenDialog(mainWindow ?? BrowserWindow.getAllWindows()[0], {
+        title: '把选中的图片复制到…',
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      if (picked.canceled || !picked.filePaths[0]) {
+        return { copied: 0, skipped: 0, target: null, errors: [] };
+      }
+      dir = picked.filePaths[0];
+    }
+
+    let copied = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+    for (const id of ids) {
+      try {
+        const row = db.getImageRow(id);
+        if (!row) { errors.push(`#${id} 不在索引里`); continue; }
+        const src = row.abs_path as string;
+        const target = path.join(dir, row.file_name as string);
+        if (path.resolve(target) === path.resolve(src)) { skipped++; continue; }
+        if (fs.existsSync(target)) { skipped++; continue; }
+        await fsp.copyFile(src, target);
+        copied++;
+      } catch (e) {
+        errors.push(`${id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return { copied, skipped, target: dir, errors };
+  });
+
   /** 批量删除:逐张移入回收站并清索引,失败的单独记下来不让整批中断 */
   handle('deleteImages', async (ids: number[]) => {
     const errors: string[] = [];

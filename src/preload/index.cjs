@@ -92,6 +92,7 @@ const api = {
   copyImageToFolder: (id) => call('copyImageToFolder', id),
   deleteImages: (ids) => call('deleteImages', ids),
   moveImages: (ids, targetDir) => call('moveImages', ids, targetDir),
+  copyImagesToFolder: (ids, targetDir) => call('copyImagesToFolder', ids, targetDir),
 
   // ---- 设置
   getSettings: () => call('getSettings'),

@@ -161,9 +161,18 @@ style.textContent = `
   .cam-drag input, .cam-drag select, .cam-drag button, .cam-drag textarea { -webkit-app-region: no-drag; }
   /* 多选操作条:贴在窗口底部中间 */
   .cam-selectbar { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
-    display: flex; align-items: center; gap: 8px; padding: 8px 12px; z-index: 140;
+    display: flex; align-items: center; gap: 6px; padding: 7px 10px; z-index: 140;
+    max-width: calc(100vw - 24px); flex-wrap: wrap; justify-content: center;
     background: var(--panel2); border: 1px solid var(--border); border-radius: 12px;
     box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+  /* 批量条按钮:比通用 btn 更紧凑(按钮多),组件只挂 className */
+  .cam-sb-btn { background: var(--panel); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 11.5px; cursor: pointer;
+    white-space: nowrap;
+    transition: border-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease); }
+  .cam-sb-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .cam-sb-btn.danger { border-color: var(--bad); color: var(--bad); }
+  .cam-sb-btn:disabled { opacity: .45; cursor: default; }
   /* 多选勾选框:平时半透明,悬浮或已选中时实心。
      注意必须显式 pointer-events:auto —— 父级磨砂条 .cam-card-bar 是 pointer-events:none,
      不声明的话勾选框根本点不到(点击穿透到卡片变成打开详情)。 */
@@ -177,6 +186,11 @@ style.textContent = `
   .cam-card:hover .cam-pick { opacity: 1; }
   .cam-pick.on { opacity: 1; background: var(--accent); border-color: var(--accent); color: #04121f; font-weight: 700; }
   .cam-card.picked { box-shadow: inset 0 0 0 2px var(--accent-soft); }
+  /* 多选模式(#cam-scroll.selecting):勾选框与磨砂条常显,不再等悬浮;
+     与已收藏卡片同款 —— 只画渐变、不开模糊,逐帧开销不变 */
+  .cam-gridwrap.selecting .cam-card-bar { opacity: 1; }
+  .cam-gridwrap.selecting .cam-pick { opacity: 1; }
+  html[data-lite='1'] .cam-gridwrap.selecting .cam-card-bar { backdrop-filter: none; -webkit-backdrop-filter: none; }
   /* 右键菜单 */
   .cam-menu-mask { position: fixed; inset: 0; z-index: 150; }
   .cam-menu { position: fixed; z-index: 151; min-width: 176px; background: var(--panel);
@@ -347,6 +361,14 @@ style.textContent = `
     box-shadow: var(--edge), 0 3px 14px var(--accent-soft);
   }
   .cam-toolbar button.cam-tb-eye.on:hover { filter: brightness(1.06); }
+  /* 「多选」开关:激活(多选模式)时实心强调,与「收藏」筛选按钮同款 */
+  .cam-toolbar button.cam-tb-select.on {
+    background: var(--accent) !important;
+    border-color: var(--accent) !important;
+    color: #fff !important;
+    box-shadow: var(--edge), 0 3px 14px var(--accent-soft);
+  }
+  .cam-toolbar button.cam-tb-select.on:hover { filter: brightness(1.06); }
   /* Ctrl+滚轮缩放后的「还原」按钮:吸附在网格区右上角,不随滚动跑丢 */
   .cam-zoom-reset-wrap {
     position: sticky;

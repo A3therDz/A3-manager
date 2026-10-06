@@ -799,6 +799,15 @@ export function App() {
   const { value: selectedIdsState, closing: selectBarClosing, open: openSelection, close: closeSelection } = useDelayedClose<Set<number>>();
   // 延迟卸载期间 selectedIdsState 仍持有"上一次的那一批";对外统一成非空集合
   const selectedIds = selectedIdsState ?? EMPTY_SELECTION;
+  /**
+   * 多选模式:工具条「多选」开关打开后,单击卡片 = 切换选中(不再开详情),
+   * 勾选框常显,批量条常驻。Esc 或关闭开关退出,退出时清空选择。
+   */
+  const [selectMode, setSelectMode] = useState(false);
+  const exitSelectMode = useCallback(() => {
+    setSelectMode(false);
+    closeSelection();
+  }, [closeSelection]);
   const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
   /** 「加入/移出分类」弹层:目标图片(单图或整批多选)+ 指派模式的预勾选(取所有图所属分类的交集) */
   const [catPicker, setCatPicker] = useState<{ ids: number[]; initialChecked?: number[] } | null>(null);
@@ -824,6 +833,15 @@ export function App() {
       openSelection(next);
     },
     [rows, selectedIds, openSelection]
+  );
+
+  /** 多选模式下单击卡片 = 切换选中;平时单击 = 开详情(Ctrl/Shift 语义在 ImageGrid 里保持不变) */
+  const handleOpen = useCallback(
+    (id: number) => {
+      if (selectMode) handleSelect(id, 'toggle');
+      else setSelectedId(id);
+    },
+    [selectMode, handleSelect]
   );
 
   const batchMove = useCallback(async () => {
@@ -857,6 +875,51 @@ export function App() {
       notify(errMsg(e), true);
     }
   }, [notify, removeRow, selectedIds, stats]);
+
+  /** 批量复制:整批复制到同一文件夹,同名跳过;原图与索引都不动 */
+  const batchCopy = useCallback(async () => {
+    const ids = [...selectedIds];
+    if (!ids.length) return;
+    try {
+      const r = await window.api.copyImagesToFolder(ids);
+      if (!r.target) return; // 用户取消
+      notify(
+        `已复制 ${r.copied} 张` +
+          (r.skipped ? `,跳过同名 ${r.skipped} 张` : '') +
+          (r.errors.length ? `,失败 ${r.errors.length} 张` : '')
+      );
+      closeSelection();
+      setQuery((q) => ({ ...q }));
+    } catch (e) {
+      notify(errMsg(e), true);
+    }
+  }, [notify, selectedIds, setQuery]);
+
+  /** 批量收藏:渲染层循环调 setStarred(不新增 IPC);方向按第一张的状态决定 */
+  const batchStar = useCallback(async () => {
+    const ids = [...selectedIds];
+    if (!ids.length) return;
+    // 第一张未收藏 → 整批收藏;已收藏 → 整批取消
+    const target = !(rows.find((r) => r.id === ids[0])?.starred ?? false);
+    let done = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await window.api.setStarred(id, target);
+        patchRow(id, { starred: target });
+        done++;
+      } catch {
+        failed++;
+      }
+    }
+    if (done) {
+      if (selectedId !== null && selectedIds.has(selectedId)) detail.detail.reload();
+      if (query.starredOnly) void refresh();
+    }
+    notify(`已${target ? '收藏' : '取消收藏'} ${done} 张` + (failed ? `,失败 ${failed} 张` : ''));
+    closeSelection();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notify, selectedIds, rows, patchRow, selectedId, query.starredOnly, refresh]);
 
   // ---- 卡片右键菜单
   // 卡片右键菜单:关闭时先播退场动画,再卸载
@@ -978,6 +1041,13 @@ export function App() {
     [rows, selectedId]
   );
 
+  /** 批量收藏按钮的文案与方向:按第一张被选中图的当前状态决定(第一张已收藏 → 整批取消) */
+  const firstSelectedStarred = useMemo(() => {
+    const first = selectedIds.values().next().value;
+    if (first === undefined) return false;
+    return rows.find((r) => r.id === first)?.starred ?? false;
+  }, [selectedIds, rows]);
+
   const prev = useCallback(() => {
     if (viewIdx > 0) setSelectedId(rows[viewIdx - 1].id);
   }, [rows, viewIdx]);
@@ -1026,6 +1096,8 @@ export function App() {
         if (folderMenu) closeFolderMenu();
         else if (moreMenu) closeMoreMenu();
         else if (selectedIds.size) closeSelection();
+        // 多选模式:先清空选择(上面那条),再退出模式;优先级高于详情面板
+        else if (selectMode) exitSelectMode();
         else if (menu) closeMenu();
         else if (confirmBatchDelete) setConfirmBatchDelete(false);
         else if (removeRootTarget) setRemoveRootTarget(null);
@@ -1053,6 +1125,7 @@ export function App() {
   }, [
     selectedId, prev, next, setQuery, menu, folderMenu, moreMenu,
     settingsOpen, confirmDeleteId, renameTarget, selectedIds, refreshList,
+    selectMode, exitSelectMode,
   ]);
 
   // 滚到底自动加载下一页
@@ -1605,6 +1678,16 @@ export function App() {
           </button>
           <button
             type="button"
+            className={`cam-tb-select${selectMode ? ' on' : ''}`}
+            title={selectMode ? '退出多选模式(Esc),并清空当前选择' : '多选模式:单击卡片即选中/取消,批量条常驻'}
+            aria-pressed={selectMode}
+            style={{ ...btn, display: 'inline-flex', alignItems: 'center', gap: 5 }}
+            onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+          >
+            多选
+          </button>
+          <button
+            type="button"
             className={`cam-tb-eye${zen ? ' on' : ''}`}
             title={zen ? '恢复正常显示' : '隐藏预览区:网格变成磨砂玻璃,透出背景图'}
             aria-pressed={zen}
@@ -1794,7 +1877,7 @@ export function App() {
           />
         </aside>
 
-        <div id="cam-scroll" className={zen ? 'cam-gridwrap zen' : 'cam-gridwrap'} style={{ flex: 1, overflowY: zen ? 'hidden' : 'auto', overflowX: 'hidden', minHeight: 0 }}>
+        <div id="cam-scroll" className={`cam-gridwrap${zen ? ' zen' : ''}${selectMode ? ' selecting' : ''}`} style={{ flex: 1, overflowY: zen ? 'hidden' : 'auto', overflowX: 'hidden', minHeight: 0 }}>
           {zen ? null : rows.length === 0 && !loading ? (
             <div style={{ padding: 48, textAlign: 'center', color: 'var(--muted)' }}>
               没有匹配的图片 —— 试着点「刷新」重读索引,或点「重置」清空筛选
@@ -1820,7 +1903,7 @@ export function App() {
               ) : null}
               <ImageGrid
                 rows={rows}
-                onOpen={setSelectedId}
+                onOpen={handleOpen}
                 onToggleStar={toggleStar}
                 onContextMenu={openMenu}
                 selectedIds={selectedIds as Set<number>}
@@ -2079,26 +2162,33 @@ export function App() {
         </div>
       ) : null}
 
-      {selectedIds.size > 0 ? (
+      {/* 批量操作条:有选中时出现;多选模式下常驻(0 张时只留全选/退出) */}
+      {selectedIds.size > 0 || selectMode ? (
         <div className={`cam-selectbar${selectBarClosing ? ' closing' : ''}`}>
           <span style={{ fontSize: 12 }}>已选 {selectedIds.size} 张</span>
-          <button type="button" style={btn} onClick={() => openSelection(new Set(rows.map((r) => r.id)))}>
+          <button type="button" className="cam-sb-btn" onClick={() => openSelection(new Set(rows.map((r) => r.id)))}>
             全选本页
           </button>
-          <button type="button" style={btn} onClick={() => setCatPicker({ ids: [...selectedIds] })}>
-            加入分类…
+          <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => void batchCopy()}>
+            复制到文件夹…
           </button>
-          <button type="button" style={btn} onClick={() => void openRemoveCatPicker([...selectedIds])}>
-            移出分类…
-          </button>
-          <button type="button" style={btn} onClick={() => void batchMove()}>
+          <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => void batchMove()}>
             移动…
           </button>
-          <button type="button" style={{ ...btn, borderColor: 'var(--bad)', color: 'var(--bad)' }} onClick={() => setConfirmBatchDelete(true)}>
+          <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => setCatPicker({ ids: [...selectedIds] })}>
+            加入分类…
+          </button>
+          <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => void openRemoveCatPicker([...selectedIds])}>
+            移出分类…
+          </button>
+          <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => void batchStar()}>
+            {firstSelectedStarred ? '取消收藏' : '收藏'}
+          </button>
+          <button type="button" className="cam-sb-btn danger" disabled={!selectedIds.size} onClick={() => setConfirmBatchDelete(true)}>
             删除
           </button>
-          <button type="button" style={btn} onClick={() => closeSelection()}>
-            取消选择
+          <button type="button" className="cam-sb-btn" onClick={() => (selectMode ? exitSelectMode() : closeSelection())}>
+            {selectMode ? '退出多选' : '取消选择'}
           </button>
         </div>
       ) : null}
