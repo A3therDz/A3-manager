@@ -172,7 +172,9 @@ style.textContent = `
   .cam-menu-mask { position: fixed; inset: 0; z-index: 150; }
   .cam-menu { position: fixed; z-index: 151; min-width: 176px; background: var(--panel);
     border: 1px solid var(--border); border-radius: 8px; padding: 4px;
-    box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+    box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    /* 兜底:极端小窗口里菜单再高也不能顶出窗口,超出部分内部滚动 */
+    max-height: calc(100vh - 16px); overflow-y: auto; }
   .cam-menu-item { display: flex; width: 100%; text-align: left; background: none; border: 0;
     color: var(--fg); padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer;
     border-radius: 5px; align-items: center; gap: 8px;
@@ -597,6 +599,8 @@ style.textContent = `
     animation: cam-pop var(--dur-1) var(--ease);
     transform-origin: top left;
   }
+  /* 向上翻转的菜单(.flip):缩放动画从底部往上涨,方向跟着翻 */
+  .cam-menu.flip { transform-origin: bottom left; }
   .cam-toast, .cam-selectbar {
     background: var(--modal-bg) !important;
     border: 1px solid var(--glass-border) !important;

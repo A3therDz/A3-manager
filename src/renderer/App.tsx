@@ -10,7 +10,7 @@
  * 契约真源是 src/shared/types.ts —— 不要改字段名或发明新 API。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CategoryNode, DetailTarget, DroppedInspection, FolderNode, ImageQuery, LibraryRoot, SortKey } from '@shared/types';
 import { errMsg, useCategories, useFolders, useImageDetail, useImages, useScanProgress, useStats } from './api';
 import { CategoryTree, FolderTree, FolderVisibilityTree } from './components/Trees';
@@ -194,6 +194,57 @@ function useDelayedClose<T>() {
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
   return { value, closing, open, close, toggle };
+}
+
+/** 浮层锚点:右键的点击坐标,或「更多」按钮的右下角 */
+interface MenuAnchor {
+  x: number;
+  y: number;
+}
+
+/** 测量后的落点:flip = 下方放不下、菜单翻到锚点上方(动画原点也要跟着换) */
+interface AnchoredPos {
+  left: number;
+  top: number;
+  flip: boolean;
+}
+
+/**
+ * 浮层的"渲染后测量"定位:右键菜单与「更多」浮层共用。
+ *
+ * 打开时先按锚点坐标渲染(visibility:hidden,由调用方在 pos 为 null 时加上),
+ * useLayoutEffect 在**绘制前**读真实 offsetWidth/offsetHeight,再算最终位置:
+ *   - 右方不足 → 贴右边缘内收 8px(align:'right' 时先按锚点右对齐);
+ *   - 下方不足 → 向上翻转(top = 锚点 y - 菜单高);上方也放不下就贴底边;
+ *   - 极端小窗口由 .cam-menu 的 max-height 兜底(量到的高度已是钳过的)。
+ * 菜单项增删不用再改任何写死的钳位值。
+ * 隐藏帧永远不会被绘制(layoutEffect + setState 在同一帧内同步完成),用户看不到闪烁。
+ */
+function useAnchoredMenuPos(
+  anchor: MenuAnchor | null,
+  ref: React.RefObject<HTMLDivElement | null>,
+  align: 'left' | 'right' = 'left'
+): AnchoredPos | null {
+  const [pos, setPos] = useState<AnchoredPos | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!anchor || !el) {
+      setPos(null);
+      return;
+    }
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const left =
+      align === 'right'
+        ? Math.max(8, Math.min(anchor.x - w, window.innerWidth - w - 8))
+        : Math.max(8, Math.min(anchor.x, window.innerWidth - w - 8));
+    // 下方放不下才考虑翻转;翻转后仍然贴不下(上方更窄)就退回贴底边
+    const overflow = anchor.y + h > window.innerHeight - 8;
+    const flip = overflow && anchor.y - h >= 8;
+    const top = flip ? anchor.y - h : Math.min(anchor.y, Math.max(8, window.innerHeight - h - 8));
+    setPos((cur) => (cur && cur.left === left && cur.top === top && cur.flip === flip ? cur : { left, top, flip }));
+  }, [anchor, ref, align]);
+  return pos;
 }
 
 /** 探测是否在用软件渲染(SwiftShader / Basic Render 之类)——这种环境下不要开实时模糊 */
@@ -409,6 +460,8 @@ export function App() {
   const { value: moreMenu, closing: moreMenuClosing, close: closeMoreMenu, toggle: toggleMoreMenuValue } = useDelayedClose<{ x: number; y: number }>();
   const moreBtnRef = useRef<HTMLButtonElement | null>(null);
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
+  // 渲染后测量定位:与卡片右键菜单共用同一套逻辑(右对齐按钮 + 下方不足向上翻转)
+  const moreMenuPos = useAnchoredMenuPos(moreMenu, moreMenuRef, 'right');
   const [aliasTarget, setAliasTarget] = useState<FolderNode | null>(null);
   // 移除图库是破坏性操作(索引会级联删除),必须二次确认
   const [removeRootTarget, setRemoveRootTarget] = useState<LibraryRoot | null>(null);
@@ -679,7 +732,7 @@ export function App() {
     };
   }, [moreMenu]);
 
-  /** 打开/关闭「更多」浮层:用视口坐标定在按钮下方,避免被 .cam-header 的 overflow 裁掉 */
+  /** 打开/关闭「更多」浮层:锚点定在按钮右下角,最终位置由 useAnchoredMenuPos 测量后算出 */
   const toggleMoreMenu = useCallback(() => {
     if (moreMenu) {
       closeMoreMenu();
@@ -687,11 +740,7 @@ export function App() {
     }
     const r = moreBtnRef.current?.getBoundingClientRect();
     if (!r) return;
-    const width = 216;
-    const height = 348;
-    const x = Math.max(8, Math.min(r.right - width, window.innerWidth - width - 8));
-    const y = Math.min(r.bottom + 6, Math.max(8, window.innerHeight - height - 8));
-    toggleMoreMenuValue({ x, y });
+    toggleMoreMenuValue({ x: r.right, y: r.bottom + 6 });
   }, [moreMenu, closeMoreMenu, toggleMoreMenuValue]);
 
   /**
@@ -812,14 +861,29 @@ export function App() {
   // ---- 卡片右键菜单
   // 卡片右键菜单:关闭时先播退场动画,再卸载
   const { value: menu, closing: menuClosing, open: showMenuAt, close: closeMenu } = useDelayedClose<{ x: number; y: number; id: number }>();
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  // 渲染后测量定位:先隐形渲染在点击处,量出真实宽高再钳位/翻转(菜单项增删不用再改钳位值)
+  const menuPos = useAnchoredMenuPos(menu, menuRef);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   // 重命名弹层:目标 id + 输入框内容
   const [renameTarget, setRenameTarget] = useState<{ id: number; name: string } | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const openMenu = useCallback((id: number, x: number, y: number) => {
-    // 防止菜单超出窗口右/下边缘
-    showMenuAt({ id, x: Math.min(x, window.innerWidth - 190), y: Math.min(y, window.innerHeight - 240) });
+    // 坐标原样存作锚点;防超出窗口由 useAnchoredMenuPos 按真实尺寸处理
+    showMenuAt({ id, x, y });
   }, [showMenuAt]);
+
+  // 菜单打开期间:网格滚动 / 窗口改尺寸即关闭(与「更多」浮层一致)
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => closeMenu();
+    window.addEventListener('resize', close);
+    document.getElementById('cam-scroll')?.addEventListener('scroll', close, { passive: true });
+    return () => {
+      window.removeEventListener('resize', close);
+      document.getElementById('cam-scroll')?.removeEventListener('scroll', close);
+    };
+  }, [menu, closeMenu]);
 
   const menuRow = menu ? rows.find((r) => r.id === menu.id) : undefined;
 
@@ -1784,7 +1848,16 @@ export function App() {
               closeMenu();
             }}
           />
-          <div className={`cam-menu${menuClosing ? ' closing' : ''}`} style={{ left: menu.x, top: menu.y }}>
+          <div
+            ref={menuRef}
+            className={`cam-menu${menuPos?.flip ? ' flip' : ''}${menuClosing ? ' closing' : ''}`}
+            style={{
+              left: menuPos?.left ?? menu.x,
+              top: menuPos?.top ?? menu.y,
+              // 首帧先隐形:useLayoutEffect 量完尺寸、算出落点后同帧显示,不会闪烁
+              visibility: menuPos ? undefined : 'hidden',
+            }}
+          >
             <button type="button" className="cam-menu-item" onClick={() => { closeMenu(); setSelectedId(menu.id); }}>
               查看参数
             </button>
@@ -2057,8 +2130,13 @@ export function App() {
           />
           <div
             ref={moreMenuRef}
-            className={`cam-menu${moreMenuClosing ? ' closing' : ''}`}
-            style={{ left: moreMenu.x, top: moreMenu.y, minWidth: 216 }}
+            className={`cam-menu${moreMenuPos?.flip ? ' flip' : ''}${moreMenuClosing ? ' closing' : ''}`}
+            style={{
+              left: moreMenuPos?.left ?? moreMenu.x,
+              top: moreMenuPos?.top ?? moreMenu.y,
+              minWidth: 216,
+              visibility: moreMenuPos ? undefined : 'hidden',
+            }}
             onMouseDown={(e) => e.stopPropagation()}
           >
             <button
