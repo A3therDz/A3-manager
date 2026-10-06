@@ -9,8 +9,9 @@
  *   - 支持一次把**多张图**加入多个分类(setCategoryMembers 本身收数组)。
  *
  * 模式:
- *   - 传 initialChecked(单图详情)= 指派模式:预勾选当前归属,确定时按差集增删;
- *   - 不传(批量条)= 追加模式:勾选的都是"要加入",不做移出。
+ *   - 传 initialChecked = 指派模式(详情面板「分类…」、右键/批量条「移出分类…」):
+ *     预勾选当前归属(批量时取所有图分类的交集),确定时按差集增删;
+ *   - 不传(右键/批量条「加入分类…」)= 追加模式:勾选的都是"要加入",不做移出。
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -21,7 +22,7 @@ interface Props {
   categories: CategoryNode[];
   /** 目标图片 id:单图传 1 个,批量传整批 */
   imageIds: number[];
-  /** 单图模式传当前归属(预勾选);批量模式省略 = 只加不移 */
+  /** 传当前归属(预勾选,批量时取交集)= 指派模式,可增可移;省略 = 追加模式,只加不移 */
   initialChecked?: number[];
   onClose: () => void;
   /** 应用成功(或新建了分类)后回调,父组件负责刷新分类树与归属 */
@@ -132,8 +133,19 @@ export function CategoryPicker({ categories, imageIds, initialChecked, onClose, 
         }}
       >
         <h2 style={{ fontSize: 13, margin: 0, padding: '12px 14px', borderBottom: '1px solid var(--border)' }}>
-          {imageIds.length > 1 ? `把 ${imageIds.length} 张图片加入分类` : '加入分类'}
+          {assignMode
+            ? imageIds.length > 1
+              ? `编辑 ${imageIds.length} 张图片的分类`
+              : '编辑分类'
+            : imageIds.length > 1
+              ? `把 ${imageIds.length} 张图片加入分类`
+              : '加入分类'}
         </h2>
+        {assignMode ? (
+          <div style={{ fontSize: 11, color: 'var(--muted)', padding: '8px 14px 2px' }}>
+            预勾选的是当前归属;取消勾选 = 移出该分类,点「确定」一次性生效。
+          </div>
+        ) : null}
         <div style={{ overflowY: 'auto', padding: '6px 0', flex: 1 }}>
           {flatCats.length === 0 ? (
             <div style={{ color: 'var(--muted)', fontSize: 11, padding: '10px 14px' }}>

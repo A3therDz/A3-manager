@@ -188,7 +188,7 @@ export function DetailPanel({
   const indexed: ImageDetail | null = target.kind === 'indexed' ? target.detail : null;
   const dropped = target.kind === 'dropped' ? target.info : null;
 
-  // 「加入分类」弹层:勾选只是暂存,点「确定」才落库(见 CategoryPicker)
+  // 「分类…」弹层:勾选只是暂存,点「确定」才落库(见 CategoryPicker)
   const [catModalOpen, setCatModalOpen] = useState(false);
 
   // 预览图原图加载失败时退回缩略图(换图时重置)
@@ -362,13 +362,34 @@ export function DetailPanel({
           <Section title="分类">
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <button type="button" style={primaryBtn} onClick={openCatModal}>
-                + 加入分类
+                分类…
               </button>
-              <span style={{ color: 'var(--muted)', fontSize: 11 }}>
-                {catIds.length
-                  ? catIds.map((id) => names.get(id) ?? `#${id}`).join('、')
-                  : '不属于任何分类'}
-              </span>
+              {catIds.length === 0 ? (
+                <span style={{ color: 'var(--muted)', fontSize: 11 }}>不属于任何分类</span>
+              ) : (
+                // 每个分类一个小胶囊,✕ 即点即移出(不开弹层)
+                catIds.map((id) => (
+                  <span key={id} className="cam-chip">
+                    {names.get(id) ?? `#${id}`}
+                    <button
+                      type="button"
+                      className="cam-chip-x"
+                      title={`从「${names.get(id) ?? `#${id}`}」移出`}
+                      onClick={() => {
+                        void window.api
+                          .setCategoryMembers(id, [indexed.id], false)
+                          .then(() => {
+                            notify(`已移出「${names.get(id) ?? `#${id}`}」`);
+                            onChanged();
+                          })
+                          .catch((e) => notify(errMsg(e), true));
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))
+              )}
             </div>
           </Section>
         ) : null}

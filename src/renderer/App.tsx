@@ -800,8 +800,8 @@ export function App() {
   // 延迟卸载期间 selectedIdsState 仍持有"上一次的那一批";对外统一成非空集合
   const selectedIds = selectedIdsState ?? EMPTY_SELECTION;
   const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
-  /** 「加入分类」弹层的目标图片:单图(右键菜单)或整批多选(批量条) */
-  const [catPickerIds, setCatPickerIds] = useState<number[] | null>(null);
+  /** 「加入/移出分类」弹层:目标图片(单图或整批多选)+ 指派模式的预勾选(取所有图所属分类的交集) */
+  const [catPicker, setCatPicker] = useState<{ ids: number[]; initialChecked?: number[] } | null>(null);
   const anchorRef = useRef<number | null>(null);
   const handleSelect = useCallback(
     (id: number, mode: 'toggle' | 'range') => {
@@ -1157,6 +1157,53 @@ export function App() {
         categories.reload();
         // 详情面板正开着这几张里的某一张 → 归属信息要跟着刷新
         if (selectedIdRef.current !== null && ids.includes(selectedIdRef.current)) detail.cats.reload();
+      } catch (e) {
+        notify(errMsg(e), true);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [notify]
+  );
+
+  /**
+   * 「移出分类…」:打开 CategoryPicker 的指派模式。
+   * 预勾选 = 所有目标图片所属分类的**交集**(每张图都在的分类才预勾),
+   * 用户取消勾选即整批移出;交集为空时不开弹层,直接提示。
+   */
+  const openRemoveCatPicker = useCallback(
+    async (ids: number[]) => {
+      if (!ids.length) return;
+      try {
+        const perImage = await Promise.all(ids.map((id) => window.api.getImageCategories(id)));
+        const common = perImage.reduce((acc, list) => acc.filter((c) => list.includes(c)));
+        if (common.length === 0) {
+          notify(ids.length > 1 ? '这些图片没有共同所属的分类' : '这张图片不属于任何分类', true);
+          return;
+        }
+        setCatPicker({ ids, initialChecked: common });
+      } catch (e) {
+        notify(errMsg(e), true);
+      }
+    },
+    [notify]
+  );
+
+  /**
+   * 正在浏览某个分类时的直达移出:不弹选择框,直接整批移出当前分类。
+   * 移出后这些图不再属于当前视图,网格原地刷新让它们消失。
+   */
+  const removeFromCurrentCategory = useCallback(
+    async (categoryId: number, ids: number[]) => {
+      if (!ids.length) return;
+      const name = catNameById(catListRef.current, categoryId) ?? '当前分类';
+      try {
+        await window.api.setCategoryMembers(categoryId, ids, false);
+        notify(ids.length > 1 ? `已把 ${ids.length} 张移出「${name}」` : `已移出「${name}」`);
+        categories.reload();
+        // 详情面板正开着这几张里的某一张 → 归属信息要跟着刷新
+        if (selectedIdRef.current !== null && ids.includes(selectedIdRef.current)) detail.cats.reload();
+        void refresh();
+        if (ids.length > 1) closeSelection();
       } catch (e) {
         notify(errMsg(e), true);
       }
@@ -1896,11 +1943,38 @@ export function App() {
                 // 右键的卡在多选集合里 → 整批加入;否则只操作这一张
                 const ids = selectedIds.has(menu.id) && selectedIds.size > 1 ? [...selectedIds] : [menu.id];
                 closeMenu();
-                setCatPickerIds(ids);
+                setCatPicker({ ids });
               }}
             >
               加入分类…
             </button>
+            <button
+              type="button"
+              className="cam-menu-item"
+              onClick={() => {
+                // 与「加入分类…」同一批目标;指派模式弹层,预勾选取整批分类的交集
+                const ids = selectedIds.has(menu.id) && selectedIds.size > 1 ? [...selectedIds] : [menu.id];
+                closeMenu();
+                void openRemoveCatPicker(ids);
+              }}
+            >
+              移出分类…
+            </button>
+            {query.categoryId !== undefined ? (
+              <button
+                type="button"
+                className="cam-menu-item"
+                onClick={() => {
+                  // 正在浏览某个分类:直达移出,不开弹层
+                  const ids = selectedIds.has(menu.id) && selectedIds.size > 1 ? [...selectedIds] : [menu.id];
+                  const categoryId = query.categoryId;
+                  closeMenu();
+                  if (categoryId !== undefined) void removeFromCurrentCategory(categoryId, ids);
+                }}
+              >
+                从当前分类移出
+              </button>
+            ) : null}
             <div className="cam-menu-sep" />
             <button type="button" className="cam-menu-item" onClick={() => { closeMenu(); void window.api.copyImageToClipboard(menu.id).then(() => notify('图片已复制到剪贴板')).catch((e) => notify(errMsg(e), true)); }}>
               复制图片(剪贴板)
@@ -2011,8 +2085,11 @@ export function App() {
           <button type="button" style={btn} onClick={() => openSelection(new Set(rows.map((r) => r.id)))}>
             全选本页
           </button>
-          <button type="button" style={btn} onClick={() => setCatPickerIds([...selectedIds])}>
+          <button type="button" style={btn} onClick={() => setCatPicker({ ids: [...selectedIds] })}>
             加入分类…
+          </button>
+          <button type="button" style={btn} onClick={() => void openRemoveCatPicker([...selectedIds])}>
+            移出分类…
           </button>
           <button type="button" style={btn} onClick={() => void batchMove()}>
             移动…
@@ -2438,15 +2515,18 @@ export function App() {
         </div>
       ) : null}
 
-      {catPickerIds ? (
+      {catPicker ? (
         <CategoryPicker
           categories={catList}
-          imageIds={catPickerIds}
-          onClose={() => setCatPickerIds(null)}
+          imageIds={catPicker.ids}
+          initialChecked={catPicker.initialChecked}
+          onClose={() => setCatPicker(null)}
           onApplied={() => {
             refreshCategories();
+            // 正在浏览某个分类:移出会让图离开当前视图,网格原地刷新
+            if (query.categoryId !== undefined) void refresh();
             // 批量条场景:加入完成后收起选择,给用户一个明确的"做完了"收尾
-            if (catPickerIds.length > 1) closeSelection();
+            if (catPicker.ids.length > 1) closeSelection();
           }}
           notify={notify}
         />

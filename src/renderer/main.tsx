@@ -132,6 +132,15 @@ style.textContent = `
     opacity: .6; transition: opacity .12s ease, color .12s ease, border-color .12s ease; }
   .cam-copy-btn:hover { opacity: 1; color: var(--accent); border-color: var(--accent); }
   .cam-copy-btn.ok { opacity: 1; color: var(--ok); border-color: var(--ok); }
+  /* 详情面板的分类小胶囊:磨砂小胶囊,✕ 平时安静、悬浮整条时显色 */
+  .cam-chip { display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px 2px 9px;
+    border-radius: 999px; font-size: 11px; color: var(--fg);
+    background: color-mix(in srgb, var(--panel2) 82%, transparent);
+    border: 1px solid var(--border); }
+  .cam-chip-x { background: none; border: 0; padding: 0 2px; font: inherit; font-size: 10px;
+    line-height: 1; color: var(--muted); cursor: pointer;
+    transition: color var(--dur-1) var(--ease); }
+  .cam-chip:hover .cam-chip-x { color: var(--bad); }
   /* 分类行管理小按钮:悬浮该行才显示 */
   .cam-mini { background: none; border: 0; color: var(--muted); padding: 2px 4px;
     font-size: 11px; cursor: pointer; opacity: 0; flex-shrink: 0; font-family: inherit; }
