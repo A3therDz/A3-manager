@@ -12,25 +12,66 @@
  * 在沙箱内无法构建,但代码本身可静态审查。
  */
 
-import { app, BrowserWindow, Tray, Menu, ipcMain, shell, clipboard, nativeImage, protocol, net, dialog } from 'electron';
+import { app, BrowserWindow, Tray, Menu, ipcMain, shell, clipboard, nativeImage, protocol, net, dialog, screen } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { DatabaseSync } from 'node:sqlite';
 import { AssetDb } from './db.ts';
-import { scanLibrary, THUMB_DIR_NAME, type ScanProgress } from './indexer.ts';
+import { scanLibrary, THUMB_DIR_NAME, META_VERSION, type ScanProgress } from './indexer.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const toolsRequire = createRequire(import.meta.url);
+/**
+ * 解析器在打包后的相对位置会变(开发时在 dist/main 旁边,打包后在 app.asar 根目录),
+ * 所以按"相对 app 根 + 相对本文件"两个位置依次找,找到哪个用哪个。
+ * 必须和扫描器共用同一份实现,否则"拖入解析"和"入库解析"会不一致。
+ */
+function loadComfyParser(): string {
+  const candidates = [
+    path.join(app.getAppPath(), 'tools', 'comfy-parser.cjs'),
+    path.join(__dirname, '..', 'tools', 'comfy-parser.cjs'),
+    path.join(__dirname, '..', '..', 'tools', 'comfy-parser.cjs'),
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {
+      /* 继续试下一个 */
+    }
+  }
+  return candidates[0];
+}
+
+// 与扫描器共用同一个解析器(必须是同一份实现,否则拖入解析和入库解析会不一致)
+const { extractFromPng } = toolsRequire(loadComfyParser()) as {
+  extractFromPng: (filePath: string, opts?: { keepRaw?: boolean }) => {
+    dimensions: { width: number; height: number } | null;
+    meta: import('../shared/types.ts').GenerationMeta;
+  };
+};
 const isDev = !app.isPackaged;
 
 // ---------------------------------------------------------------- 路径
 
-const DATA_DIR = path.join(app.getPath('userData'), 'data');
+/**
+ * 数据目录(设置 + 索引库)默认在 userData 里。
+ * `CAM_DATA_DIR` 可以覆盖它 —— 与 `tools/cli-index.ts` 是同一个环境变量:
+ *   - 把索引库放到别的盘(库很大时有用);
+ *   - 隔离测试(不想碰用户的真实索引库)。
+ */
+const DATA_DIR = process.env.CAM_DATA_DIR
+  ? path.resolve(process.env.CAM_DATA_DIR)
+  : path.join(app.getPath('userData'), 'data');
 const DB_FILE = path.join(DATA_DIR, 'index.db');
 
 // ---------------------------------------------------------------- 设置
 
-const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json');
+const SETTINGS_FILE = process.env.CAM_DATA_DIR
+  ? path.join(path.dirname(DATA_DIR), 'settings.json')
+  : path.join(app.getPath('userData'), 'settings.json');
 
 /**
  * 从旧名字(ComfyUI 资产管理器)迁移索引与设置:
@@ -41,6 +82,9 @@ function migrateLegacyUserData(): void {
     const legacyDir = path.join(app.getPath('appData'), 'ComfyUI 资产管理器');
     if (!fs.existsSync(legacyDir)) return;
     const dataDir = path.join(app.getPath('userData'), 'data');
+    // 自定义数据目录(CAM_DATA_DIR)时不要迁移:那是"我已经指定好库在哪",
+    // 把旧目录的索引拷进去会覆盖/污染用户明确指定的位置。
+    if (DATA_DIR !== dataDir) return;
     const legacyDb = path.join(legacyDir, 'data', 'index.db');
     if (fs.existsSync(legacyDb) && !fs.existsSync(path.join(dataDir, 'index.db'))) {
       fs.mkdirSync(dataDir, { recursive: true });
@@ -49,6 +93,7 @@ function migrateLegacyUserData(): void {
     }
     const legacySettings = path.join(legacyDir, 'settings.json');
     if (fs.existsSync(legacySettings) && !fs.existsSync(SETTINGS_FILE)) {
+      fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
       fs.copyFileSync(legacySettings, SETTINGS_FILE);
       console.log('[migrate] 已从旧目录迁入设置');
     }
@@ -68,6 +113,12 @@ let settings: {
   reduceEffects: boolean;
   backgroundImage: string | null;
   backgroundFit: 'cover' | 'stretch' | 'contain' | 'tile';
+  petEnabled: boolean;
+  petPosition: { x: number; y: number } | null;
+  petIconSize: number;
+  petPanelSize: { width: number; height: number };
+  petImageFirst: boolean;
+  lastBrowseRelDir: string | null;
   configVersion: number;
 } = {
   closeToTray: true,
@@ -76,6 +127,13 @@ let settings: {
   reduceEffects: false,
   backgroundImage: null,
   backgroundFit: 'cover',
+  petEnabled: false,
+  petPosition: null,
+  petIconSize: 64,
+  petPanelSize: { width: 430, height: 620 },
+  // 默认"图片优先":小窗里先看见图,参数想看再点开
+  petImageFirst: true,
+  lastBrowseRelDir: null,
   configVersion: CONFIG_VERSION,
 };
 try {
@@ -94,6 +152,9 @@ if ((settings.configVersion ?? 0) < 2) {
 }
 
 function saveSettings(): void {
+  // 自定义数据目录时 settings.json 的父目录可能还不存在(默认情况下 userData 已经被 Electron 建好了)
+  const dir = path.dirname(SETTINGS_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }
 
@@ -109,8 +170,11 @@ function mergeLegacyRoots(): void {
   try {
     const legacyDb = path.join(app.getPath('appData'), 'ComfyUI 资产管理器', 'data', 'index.db');
     if (!fs.existsSync(legacyDb) || legacyDb === DB_FILE) return;
-    // 用只读连接读旧库,避免影响它
-    const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
+    // 自定义数据目录(CAM_DATA_DIR)时不补登记:那是"我自己指定的库",
+    // 不该把用户旧库里的图库顺手搬进来(隔离测试尤其需要这条)。
+    if (DATA_DIR !== path.join(app.getPath('userData'), 'data')) return;
+    // 用只读连接读旧库,避免影响它。
+    // 注意:这里是 ESM,不能用 require();主进程已经 import 了 DatabaseSync,直接复用。
     const old = new DatabaseSync(legacyDb, { readOnly: true });
     const rows = old.prepare('SELECT path, label FROM roots').all() as Array<{ path: string; label: string }>;
     old.close();
@@ -141,11 +205,16 @@ function ensureDirs(): void {
 
 let db: AssetDb;
 let mainWindow: BrowserWindow | null = null;
+/** 工作小窗(桌宠)。始终置顶、透明、不进任务栏 */
+let petWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let scanAbort: AbortController | null = null;
 let lastProgress: ScanProgress | null = null;
 /** 关闭按钮是"收进托盘"还是"退出" */
 let quitting = false;
+
+/** 拖入图片预览的最长边(只影响界面预览,原图不动) */
+const PREVIEW_MAX = 900;
 
 const THUMB_W = 400;
 const THUMB_H = 400;
@@ -176,6 +245,14 @@ function applyWindowChrome(): void {
 //   1. 忽略自己的缩略图缓存目录(.comfy-thumbs),否则一边看图一边触发扫描;
 //   2. 去抖 1.5s —— 复制一批图进来只扫一次。
 let rootWatchers: fs.FSWatcher[] = [];
+/**
+ * 每个图库根的递归文件监听是否健康。
+ *
+ * 监听健康 = 应用运行期间的新增/删除都会被实时捕获,于是**不必**在启动时
+ * 再遍历一遍目录树(那才是启动卡顿的来源:一万个文件 stat 一遍)。
+ * 监听缺失或报错 → 退回全量对账,保证不会漏掉变化。
+ */
+const watchHealthy = new Map<number, boolean>();
 const pendingRootIds = new Set<number>();
 let watchTimer: NodeJS.Timeout | null = null;
 
@@ -192,6 +269,7 @@ function scheduleAutoScan(rootId: number): void {
 
 /** 图库根变化(增删/启停)后重建监听 */
 function syncRootWatchers(): void {
+  watchHealthy.clear();
   for (const w of rootWatchers) {
     try { w.close(); } catch { /* 已关闭 */ }
   }
@@ -208,12 +286,20 @@ function syncRootWatchers(): void {
         if (rel.split(/[\\/]/).includes(THUMB_DIRNAME)) return;
         scheduleAutoScan(root.id);
       });
-      watcher.on('error', () => { /* 目录被拔掉/断开时忽略 */ });
+      watcher.on('error', () => {
+        // 监听断了(盘被拔掉、句柄失效)—— 之后靠全量对账兜底
+        watchHealthy.set(root.id, false);
+        console.log('[watch] 监听失效,转为全量对账:', root.path);
+      });
       rootWatchers.push(watcher);
+      watchHealthy.set(root.id, true);
       console.log('[watch] 监听', root.path);
-    } catch { /* 目录不存在或平台不支持递归监听 */ }
+    } catch {
+      // 目录不存在,或平台不支持递归监听 —— 标记为不健康,交给全量对账
+      watchHealthy.set(root.id, false);
+    }
   }
-  console.log('[watch] 监听图库目录:', rootWatchers.length);
+  console.log('[watch] 监听图库目录:', rootWatchers.length, '健康:', [...watchHealthy.values()].filter(Boolean).length);
 }
 
 function createWindow(): void {
@@ -274,7 +360,128 @@ function showWindow(): void {
   mainWindow.focus();
 }
 
+// ---------------------------------------------------------------- 工作小窗(桌宠)
+
+/**
+ * 小图标首次出现的位置:屏幕右下角留一点边距。
+ * 之后位置由用户在桌面上拖动决定,存在 settings.petPosition 里。
+ */
+function defaultPetPosition(iconSize: number): { x: number; y: number } {
+  try {
+    const display = screen.getPrimaryDisplay();
+    const wa = display.workArea;
+    return {
+      x: Math.round(wa.x + wa.width - iconSize - 32),
+      y: Math.round(wa.y + wa.height - iconSize - 96),
+    };
+  } catch {
+    return { x: 1200, y: 600 };
+  }
+}
+
+/**
+ * 创建小窗。
+ *
+ * 关键取舍:窗口本身是**透明的、置顶的、不进任务栏**,里面同时装"小图标"和"展开后的工作窗"。
+ * 展开/收起时由渲染层调用 movePetWindow 把窗口挪成对应的尺寸 ——
+ * 这样透明区域不会挡住桌面点击(窗口矩形有多大,可点区域就有多大)。
+ */
+function createPetWindow(): void {
+  if (petWindow && !petWindow.isDestroyed()) return;
+  const iconSize = Math.max(40, Math.min(160, settings.petIconSize || 64));
+  const pos = settings.petPosition || defaultPetPosition(iconSize);
+
+  petWindow = new BrowserWindow({
+    x: pos.x,
+    y: pos.y,
+    width: iconSize,
+    height: iconSize,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    // 必须可 resize:收起态 64×64、展开态要变成"面板 + 图标"的包围盒。
+    // 之前写死 resizable:false(再叠加 thickFrame:false)会让 setBounds 改不了尺寸,
+    // 于是面板被画在窗口外面 —— 表现就是"只看到一条白条、图标位置也不对"。
+    resizable: true,
+    // 去掉 Windows 的可调边框框架:frame:false 时 thickFrame 默认仍为 true,
+    // 会在透明窗口顶部画出一条浅色框架条(用户看到的"白条")。程序改尺寸走 setBounds,
+    // 不依赖这条边框。
+    thickFrame: false,
+    movable: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    show: false,
+    title: '',
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  // 悬浮在所有普通窗口之上(但不抢焦点)
+  petWindow.setAlwaysOnTop(true, 'floating');
+  petWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+
+  const file = path.join(__dirname, '../renderer/pet.html');
+  if (fs.existsSync(file)) {
+    void petWindow.loadFile(file);
+  } else {
+    console.error('[pet] 找不到 pet.html,小窗无法加载:', file);
+  }
+
+  petWindow.once('ready-to-show', () => {
+    // 标题留空:无边框窗口的标题会在悬停时被当成提示条画出来
+    petWindow?.setTitle('');
+    if (settings.petEnabled) petWindow?.showInactive();
+  });
+  petWindow.on('closed', () => {
+    petWindow = null;
+  });
+}
+
+function destroyPetWindow(): void {
+  if (!petWindow || petWindow.isDestroyed()) {
+    petWindow = null;
+    return;
+  }
+  petWindow.destroy();
+  petWindow = null;
+}
+
+function broadcastPetState(): void {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed()) continue;
+    w.webContents.send('pet:stateChanged');
+  }
+}
+
+/** 设置里开关"工作小窗"时调用 */
+function setPetEnabled(enabled: boolean): void {
+  settings.petEnabled = enabled;
+  saveSettings();
+  if (enabled) {
+    if (!petWindow || petWindow.isDestroyed()) createPetWindow();
+    else petWindow.showInactive();
+  } else {
+    destroyPetWindow();
+  }
+  broadcastPetState();
+  rebuildTrayMenu();
+}
+
 // ---------------------------------------------------------------- 托盘
+
+let refreshTrayMenu: (() => void) | null = null;
+
+/** 设置变化后让托盘菜单重新生成(比如"小窗模式"的勾选状态) */
+function rebuildTrayMenu(): void {
+  refreshTrayMenu?.();
+}
 
 function buildTray(): void {
   // 用内置图标兜底:没有图标文件时 Electron 仍需要一个非空 Image
@@ -305,6 +512,12 @@ function buildTray(): void {
         { type: 'separator' },
         { label: '打开主界面', click: showWindow },
         {
+          label: '工作小窗(桌宠)',
+          type: 'checkbox',
+          checked: settings.petEnabled === true,
+          click: (item) => setPetEnabled(item.checked),
+        },
+        {
           label: '立即扫描',
           click: () => {
             void runScan({});
@@ -330,17 +543,28 @@ function buildTray(): void {
     );
   };
 
+  refreshTrayMenu = refreshMenu;
   refreshMenu();
   tray.on('double-click', showWindow);
   tray.on('click', () => tray?.popUpContextMenu());
 
-  // 进度变化时刷新托盘提示
+  // 进度变化时刷新托盘提示。
+  // 注意节流:扫描期间进度事件很密,每次都 Menu.buildFromTemplate 重建托盘菜单
+  // 是白花的开销(还会抢占主进程)。提示文字每次都更新,菜单只在阶段变化或
+  // 距上次重建超过 1 秒时才重建。
+  let lastTrayPhase: string | null = null;
+  let lastTrayRebuild = 0;
   progressListeners.push((p) => {
     lastProgress = p;
     tray?.setToolTip(
       p.phase === 'parsing' ? `扫描中 ${p.processed}/${p.total}` : 'A3 manager'
     );
-    refreshMenu();
+    const now = Date.now();
+    if (p.phase !== lastTrayPhase || now - lastTrayRebuild > 1000) {
+      lastTrayPhase = p.phase;
+      lastTrayRebuild = now;
+      refreshMenu();
+    }
   });
 }
 
@@ -360,13 +584,20 @@ function broadcastProgress(p: ScanProgress): void {
  * 扫描是同步 CPU/IO 密集操作,这里分片执行:
  * 每片只处理一小批,然后让出事件循环,避免 UI 完全冻结。
  */
-async function runScan(opts: { rootIds?: number[]; force?: boolean }): Promise<void> {
+async function runScan(opts: { rootIds?: number[]; force?: boolean; forceRescan?: boolean }): Promise<void> {
   if (scanAbort) return; // 已在扫描
   scanAbort = new AbortController();
+  // 解析器口径变过(升级后第一次启动)→ 强制重扫一遍元数据,用户不必手动点重新扫描
+  const storedMetaVersion = db.getKv('meta_version');
+  const metaChanged = storedMetaVersion !== String(META_VERSION);
+  if (metaChanged) {
+    console.log('[scan] 解析版本', storedMetaVersion ?? '(无)', '→', META_VERSION, ',本次强制重扫元数据');
+  }
   try {
     await scanLibrary(db, {
       rootIds: opts.rootIds,
-      force: opts.force,
+      force: opts.force === true || metaChanged,
+      forceRescan: opts.forceRescan === true || metaChanged,
       signal: scanAbort.signal,
       onProgress: broadcastProgress,
     });
@@ -384,6 +615,17 @@ async function runScan(opts: { rootIds?: number[]; force?: boolean }): Promise<v
     });
   } finally {
     scanAbort = null;
+    if (lastProgress && lastProgress.phase === 'done' && lastProgress.message) {
+      console.log('[scan]', lastProgress.message);
+    }
+    // 只有整轮跑完(没被取消/中途出错)才记下版本,否则下次还会再扫一遍
+    if (!lastProgress || lastProgress.phase === 'done') {
+      try {
+        db.setKv('meta_version', String(META_VERSION));
+      } catch {
+        /* 记不下就下次再扫 */
+      }
+    }
   }
 }
 
@@ -449,6 +691,54 @@ function releaseThumbSlot(): void {
   if (next) next();
 }
 
+/**
+ * 把前端传来的目录参数解析成绝对路径。
+ * 左侧文件夹树传的是相对某个图库根的相对路径('' 表示图库根本身),
+ * 绝对路径也接受(拖入图片的所在目录就走这条)。
+ */
+function resolveLibraryDir(input: string): string | null {
+  const raw = String(input ?? '').trim();
+  if (raw && path.isAbsolute(raw)) return fs.existsSync(raw) ? raw : null;
+  if (raw === '') return null; // 交给下面按图库根兜底
+  for (const r of db.listRoots() as Array<{ path: string }>) {
+    const abs = path.resolve(r.path, raw);
+    if (fs.existsSync(abs)) return abs;
+  }
+  return null;
+}
+
+/** 某个图库根目录里的**直接子目录**(只扫一层,够用来定位) */
+function firstChildDirFiles(dir: string): string | null {
+  try {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.name.startsWith('.')) continue;
+      if (e.isDirectory()) {
+        const p = path.join(dir, e.name);
+        try {
+          if (fs.readdirSync(p).length > 0) return p;
+        } catch {
+          /* 读不动就换下一个 */
+        }
+      }
+    }
+  } catch {
+    /* 目录不存在 */
+  }
+  return null;
+}
+
+/** 拖入图片的预览:等比缩到 900px 里,数据量够小可以直接塞进 IPC 返回值 */
+function makePreviewDataUrl(absPath: string): { dataUrl: string | null; size: { width: number; height: number } | null } {
+  const img = nativeImage.createFromPath(absPath);
+  if (img.isEmpty()) return { dataUrl: null, size: null };
+  const size = img.getSize();
+  const scale = Math.min(PREVIEW_MAX / Math.max(size.width, size.height, 1), 1);
+  const w = Math.max(1, Math.round(size.width * scale));
+  const h = Math.max(1, Math.round(size.height * scale));
+  const out = scale < 1 ? img.resize({ width: w, height: h, quality: 'good' }) : img;
+  return { dataUrl: out.toDataURL(), size };
+}
+
 async function ensureThumb(id: number): Promise<string | null> {
   const row = db.getImageRow(id);
   if (!row) return null;
@@ -469,6 +759,9 @@ async function ensureThumb(id: number): Promise<string | null> {
 
   await acquireThumbSlot();
   try {
+    // 解码前先让出一帧:nativeImage.createFromPath 是同步大图解码(几百毫秒级),
+    // 拿到槽位立刻解码会把排队期间的界面消息再压后一轮
+    await new Promise((r) => setImmediate(r));
     const img = nativeImage.createFromPath(absPath);
     if (img.isEmpty()) return null;
     const size = img.getSize();
@@ -501,6 +794,8 @@ async function ensureThumb(id: number): Promise<string | null> {
  */
 protocol.registerSchemesAsPrivileged([
   { scheme: 'cam-thumb', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } },
+  // 原图协议:详情面板预览用(缩略图只有几百像素,放大看是糊的)
+  { scheme: 'cam-file', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } },
   // 自定义背景图:cam-bg://bg/current —— 具体读哪个文件由主进程的 settings 决定,
   // URL 里不带路径,渲染层拿不到也无从越权读取别的文件。
   { scheme: 'cam-bg', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } },
@@ -528,6 +823,22 @@ function registerThumbProtocol(): void {
       if (thumb) return net.fetch(pathToFileUrl(thumb));
 
       // 缩略图生成失败,退回原图保证界面不空
+      const row = db.getImageRow(id);
+      if (!row) return new Response('not found', { status: 404 });
+      return net.fetch(pathToFileUrl(row.abs_path as string));
+    } catch {
+      return new Response('error', { status: 500 });
+    }
+  });
+}
+
+/** 原图协议:cam-file://file/<id>,只服务索引库里的图(按 id 查库拿路径,无法越权) */
+function registerFileProtocol(): void {
+  protocol.handle('cam-file', async (request) => {
+    try {
+      const url = new URL(request.url);
+      const id = Number(url.pathname.replace(/^\/+/, ''));
+      if (!Number.isFinite(id) || id <= 0) return new Response('bad id', { status: 400 });
       const row = db.getImageRow(id);
       if (!row) return new Response('not found', { status: 404 });
       return net.fetch(pathToFileUrl(row.abs_path as string));
@@ -640,6 +951,10 @@ function registerIpc(): void {
     if (!row) throw new Error('图片不存在');
     clipboard.writeText(row.abs_path as string);
   });
+  /** 复制任意文本(提示词复制按钮用) */
+  handle('copyText', (text: string) => {
+    if (typeof text === 'string' && text) clipboard.writeText(text);
+  });
 
   // 删除:文件进系统回收站(可反悔),索引记录随之移除
   handle('deleteImage', async (id: number) => {
@@ -729,6 +1044,65 @@ function registerIpc(): void {
     const img = nativeImage.createFromPath(row.abs_path as string);
     if (img.isEmpty()) throw new Error('图片读取失败');
     clipboard.writeImage(img);
+  });
+
+  /**
+   * 复制「无元数据版」图片到剪贴板。
+   * nativeImage 解码 → 再编码成 PNG,像素完全一致,但所有
+   * tEXt / iTXt / zTXt 块在重编码时被丢掉。只写剪贴板,不落新文件。
+   */
+  handle('copyImageWithoutMetadata', async (id: number) => {
+    const row = db.getImageRow(id);
+    if (!row) throw new Error('图片不存在');
+    const img = nativeImage.createFromPath(row.abs_path as string);
+    if (img.isEmpty()) throw new Error('图片读取失败');
+    const buf = img.toPNG();
+    if (!buf || buf.length === 0) throw new Error('重新编码失败');
+    clipboard.writeImage(nativeImage.createFromBuffer(buf));
+  });
+
+  /**
+   * 只解析一个图片文件的元数据(把图片拖进窗口时用):
+   * 不入库、不复制、不动原图。非 PNG 没有内嵌元数据,只回尺寸与预览。
+   */
+  handle('inspectFile', async (filePath: string) => {
+    const abs = path.resolve(String(filePath ?? ''));
+    let st: fs.Stats;
+    try {
+      st = await fsp.stat(abs);
+    } catch {
+      throw new Error('读不到这个文件:' + abs);
+    }
+    if (!st.isFile()) throw new Error('这不是一个文件:' + abs);
+
+    const preview = makePreviewDataUrl(abs);
+    const ext = path.extname(abs).toLowerCase();
+
+    let dimensions: { width: number; height: number } | null = preview.size;
+    let meta: ReturnType<typeof extractFromPng>['meta'] | null = null;
+
+    if (ext === '.png') {
+      try {
+        const parsed = extractFromPng(abs, { keepRaw: false });
+        dimensions = parsed.dimensions ?? dimensions;
+        const m = parsed.meta;
+        if (m && (m.prompts.length > 0 || m.modelName || m.sampler || m.loras.length > 0)) {
+          meta = m;
+        }
+      } catch {
+        // PNG 解析失败(图坏了 / 读不动)—— 只给尺寸与预览,不报错
+      }
+    }
+
+    return {
+      path: abs,
+      fileName: path.basename(abs),
+      fileSize: st.size,
+      fileMtime: st.mtimeMs,
+      dimensions,
+      previewDataUrl: preview.dataUrl,
+      meta,
+    };
   });
 
   /** 复制一份到别的文件夹:原图保留,索引不变 */
@@ -823,6 +1197,38 @@ function registerIpc(): void {
     db.setFolderPref(rootId, relDir, patch)
   );
   /** 用系统浏览器打开外部链接(设置里的作者/仓库链接) */
+  /**
+   * 用资源管理器打开某个图库文件夹。
+   * relDir 为空时打开图库根目录;目录里还有子目录就直接定位到最新的那个,
+   * 免得用户点「打开所在位置」还得自己再点一层。
+   */
+  handle('openFolder', async (relDir: string) => {
+    const roots = db.listRoots() as Array<{ path: string }>;
+    if (roots.length === 0) throw new Error('还没有添加图库文件夹');
+
+    let raw = String(relDir ?? '').trim();
+    // 前端可能传绝对路径(拖入图片的所在目录)
+    if (raw && path.isAbsolute(raw)) {
+      const err = await shell.openPath(fs.existsSync(raw) ? raw : path.dirname(raw));
+      if (err) throw new Error(err);
+      return;
+    }
+
+    let dir: string | null = null;
+    if (raw === '') {
+      dir = roots[0].path;
+    } else {
+      dir = resolveLibraryDir(raw);
+    }
+    if (!dir) throw new Error('找不到这个文件夹:' + relDir);
+    if (raw !== '' && fs.existsSync(dir)) {
+      const child = firstChildDirFiles(dir);
+      if (child) dir = child;
+    }
+    const err = await shell.openPath(dir);
+    if (err) throw new Error(err);
+  });
+
   handle('openUrl', async (url: string) => {
     if (!/^https?:\/\//i.test(String(url))) throw new Error('只允许 http/https 链接');
     await shell.openExternal(String(url));
@@ -873,9 +1279,16 @@ function registerIpc(): void {
   // ---- 设置
   handle('getSettings', () => settings);
   handle('setSettings', (patch: Partial<typeof settings>) => {
+    const wantPet = patch.petEnabled;
     settings = { ...settings, ...patch };
     saveSettings();
     applyWindowChrome();
+    if (petWindow && !petWindow.isDestroyed()) petWindow.setBackgroundColor('#00000000');
+    broadcastPetState();
+    // 开关"工作小窗"要真的把窗口创建/销毁,而不是只记一个布尔值
+    if (typeof wantPet === 'boolean' && wantPet !== (petWindow !== null)) {
+      setPetEnabled(wantPet);
+    }
     return settings;
   });
 
@@ -902,6 +1315,64 @@ function registerIpc(): void {
     quitting = true;
     app.quit();
   });
+
+  // ---- 工作小窗(桌宠)
+
+  handle('getPetState', () => ({
+    enabled: settings.petEnabled === true,
+    theme: currentTheme(),
+    iconSize: settings.petIconSize,
+    panelSize: settings.petPanelSize,
+    position: settings.petPosition,
+    reduceEffects: settings.reduceEffects === true,
+    imageFirst: settings.petImageFirst !== false,
+    lastRelDir: settings.lastBrowseRelDir ?? null,
+  }));
+
+  handle('setPetPosition', (position: { x: number; y: number }) => {
+    if (!position || typeof position.x !== 'number' || typeof position.y !== 'number') return;
+    settings.petPosition = { x: Math.round(position.x), y: Math.round(position.y) };
+    saveSettings();
+  });
+
+  handle('setPetLayout', (patch: { iconSize?: number; panelSize?: { width: number; height: number } }) => {
+    if (patch && typeof patch.iconSize === 'number') {
+      settings.petIconSize = Math.max(40, Math.min(160, Math.round(patch.iconSize)));
+    }
+    if (patch && patch.panelSize && typeof patch.panelSize.width === 'number' && typeof patch.panelSize.height === 'number') {
+      settings.petPanelSize = {
+        width: Math.max(300, Math.min(900, Math.round(patch.panelSize.width))),
+        height: Math.max(360, Math.min(1200, Math.round(patch.panelSize.height))),
+      };
+    }
+    saveSettings();
+    broadcastPetState();
+  });
+
+  handle('focusMainWindow', () => {
+    showWindow();
+  });
+
+  /** 小窗自己改窗口位置/尺寸:图标态是正方形小窗,展开态是"图标 + 面板"的大窗 */
+  handle('movePetWindow', (bounds: { x: number; y: number; width: number; height: number }) => {
+    if (!petWindow || petWindow.isDestroyed()) return;
+    const b = {
+      x: Math.round(bounds.x),
+      y: Math.round(bounds.y),
+      width: Math.max(24, Math.round(bounds.width)),
+      height: Math.max(24, Math.round(bounds.height)),
+    };
+    // 单次 setBounds 同时改位置与尺寸。
+    // 之前先 setSize 再 setBounds(两次原生调用)还在每次移动时同步写配置文件,
+    // 拖动一帧一次磁盘 I/O,窗口就会"慢几秒才追上鼠标"。
+    petWindow.setBounds(b);
+    // 位置持久化不在这里做:展开时 b.x/b.y 是窗口左上角而不是图标位置,
+    // 写进去会污染 settings.petPosition。落盘由渲染层拖动结束时的 setPetPosition 负责。
+  });
+
+  handle('closePetWindow', () => {
+    setPetEnabled(false);
+  });
 }
 
 function pathToFileUrl(p: string): string {
@@ -924,25 +1395,56 @@ if (!app.requestSingleInstanceLock()) {
     syncRootWatchers();
     registerThumbProtocol();
     registerBackgroundProtocol();
+    registerFileProtocol();
     registerIpc();
     buildTray();
+    if (settings.petEnabled) createPetWindow();
     createWindow();
 
-    // 启动后的增量扫描:近 5 分钟扫过就跳过(避免每次启动都占用主线程导致"未响应")
+    /**
+     * 启动时要不要遍历目录树?
+     *
+     * 不遍历的条件(常态):文件监听健康 + 解析口径没变 + 每个启用的图库都已有索引。
+     * 因为监听是实时的,应用没运行期间有没有变化,靠扫描器里的"目录树签名"比对就能
+     * 一眼看出 —— 签名一致时它自己会整轮跳过,连 stat 都不做。
+     * 这一改把启动从"一万个文件走一遍目录树"降到"读完索引就出界面"。
+     */
     setTimeout(() => {
       const roots = db.listRoots().filter((r) => r.enabled === 1);
       if (!roots.length) return;
-      const last = Math.max(...roots.map((r) => r.lastScanAt ?? 0));
-      if (Date.now() - last < 60 * 1000) {
-        console.log('[scan] 跳过启动扫描(最近已扫过)');
+
+      const versionChanged = db.getKv('meta_version') !== String(META_VERSION);
+      const unwatched = roots.filter((r) => watchHealthy.get(r.id) !== true);
+      const empty = roots.filter((r) => db.countImages(r.id) === 0);
+      if (!versionChanged && unwatched.length === 0 && empty.length === 0) {
+        console.log('[scan] 跳过启动扫描:文件监听正常、解析版本一致、索引已就绪');
         return;
       }
-      void runScan({});
+      console.log(
+        '[scan] 启动扫描:',
+        versionChanged ? '解析版本变了 ' : '',
+        unwatched.length ? `监听不可用(${unwatched.length} 个图库) ` : '',
+        empty.length ? `空索引(${empty.length} 个图库)` : ''
+      );
+      // 监听不可用 / 空索引时要老实遍历(不能走签名快速通道)
+      void runScan({ forceRescan: versionChanged || unwatched.length > 0 });
     }, 2500);
 
-    // 兜底:文件监听的删除事件不总是可靠(比如整目录被删),每 10 分钟对账一次
+    /**
+     * 兜底对账:每 10 分钟一次,但**只在监听不健康时才真的遍历**。
+     *
+     * 以前这里是无条件 runScan,等于每 10 分钟把上万张图 stat 一遍(磁盘一直响)。
+     * 现在监听正常时这一轮什么都不做:新图由 fs.watch 实时入库,
+     * 删除由监听触发的增量扫描清理。监听不可用时才退化成全量对账。
+     */
     setInterval(() => {
-      if (!scanAbort && db.listRoots().some((r) => r.enabled === 1)) void runScan({});
+      if (scanAbort) return;
+      const roots = db.listRoots().filter((r) => r.enabled === 1);
+      if (!roots.length) return;
+      const needReconcile = roots.some((r) => watchHealthy.get(r.id) !== true);
+      if (!needReconcile) return;
+      console.log('[scan] 定时对账:存在监听不可用的图库,做一次全量遍历');
+      void runScan({ forceRescan: true });
     }, 10 * 60 * 1000);
   });
 
@@ -953,6 +1455,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', () => {
     quitting = true;
+    destroyPetWindow();
     scanAbort?.abort();
     db?.close();
   });

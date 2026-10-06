@@ -89,10 +89,16 @@ export interface LoraEntry {
 }
 
 export interface PromptBlock {
-  /** 正向或负向 */
-  role: 'positive' | 'negative';
+  /**
+   * positive / negative 是常规正负提示词;
+   * character 是 NovelAI v4+ 的角色提示词(char_captions / characterPrompts),
+   * 一个角色一块,与基础提示词分开渲染。
+   */
+  role: 'positive' | 'negative' | 'character';
   text: string;
   encoders: string[];
+  /** 仅 role='character' 时有值:像「角色 1」这样的显示标签 */
+  label?: string;
 }
 
 export interface ControlNetEntry {
@@ -135,6 +141,31 @@ export interface ImageDetail extends ImageRecord {
   position: number;
   total: number;
 }
+
+/**
+ * 拖进窗口的图片的**临时**解析结果(inspectFile 的返回)。
+ * 明确区别于 ImageRecord:没有 id、不进索引库、也不保证在任何一个图库根目录里,
+ * 所以不能做收藏 / 分类 / 重命名等需要 id 的操作。
+ */
+export interface DroppedInspection {
+  /** 绝对路径 */
+  path: string;
+  fileName: string;
+  fileSize: number;
+  /** 文件 mtime(毫秒) */
+  fileMtime: number;
+  /** PNG IHDR / nativeImage 读到的真实像素尺寸 */
+  dimensions: ImageDimensions | null;
+  /** 供详情面板直接 <img src> 的预缩小预览(原始尺寸过大时等比缩小) */
+  previewDataUrl: string | null;
+  /** 解析结果;真的是没有元数据的 PNG 时为 null */
+  meta: GenerationMeta | null;
+}
+
+/** 右侧详情面板的目标:索引里的图,或刚拖进来只做解析的图。 */
+export type DetailTarget =
+  | { kind: 'indexed'; detail: ImageDetail | null }
+  | { kind: 'dropped'; info: DroppedInspection };
 
 // ---------------------------------------------------------------- 查询
 
@@ -286,6 +317,10 @@ export interface ScanProgress {
   /** phase=done 时才有 */
   finishedAt: number | null;
   message: string | null;
+  /** 本轮新解析入库的文件数(phase=done 时有效;空扫时前端可跳过列表刷新) */
+  indexed?: number;
+  /** 本轮清理掉的失效索引数(phase=done 时有效) */
+  removed?: number;
 }
 
 // ---------------------------------------------------------------- IPC 通道
@@ -304,6 +339,27 @@ export interface AppSettings {
   backgroundImage: string | null;
   /** 背景铺法:裁切 cover / 拉伸 100%100% / 适应 contain / 平铺 repeat */
   backgroundFit: 'cover' | 'stretch' | 'contain' | 'tile';
+  /**
+   * 工作小窗(桌宠):开启后桌面上会有一个可拖动的小图标,
+   * 点一下在图标上方弹出一个小工作窗,只上下翻动。
+   */
+  petEnabled: boolean;
+  /** 小图标左上角在屏幕上的位置;null = 首次运行时自动放到右下角 */
+  petPosition: { x: number; y: number } | null;
+  /** 小图标边长(px) */
+  petIconSize: number;
+  /** 小窗的尺寸(px) */
+  petPanelSize: { width: number; height: number };
+  /**
+   * 小窗是否"图片优先":列表里的图片左右交替、详情页整屏看图、不显示参数文字。
+   * 想在小窗里看提示词/LoRA 时把它关掉,就会恢复带文字副标题的紧凑列表。
+   */
+  petImageFirst: boolean;
+  /**
+   * 上次在图库里浏览的文件夹(相对某个图库根)。
+   * 主界面切换文件夹/分类时写入,小窗打开时直接进这一层,两边保持一致。
+   */
+  lastBrowseRelDir: string | null;
 }
 
 /**
@@ -340,6 +396,17 @@ export interface ApiSurface {
   pickDirectory(): Promise<string | null>;
   /** 弹系统图片选择框,返回绝对路径;取消返回 null */
   pickImageFile(): Promise<string | null>;
+  /**
+   * **只解析**一个图片文件的元数据(拖进窗口时用),不入库、不复制、不改动原图。
+   * 任何本地路径都能传,不需要属于任何图库根目录。
+   */
+  inspectFile(path: string): Promise<DroppedInspection>;
+  /**
+   * 取拖放进来的 File 对象的真实磁盘路径。
+   * 新版 Electron 里 File.path 已经没了,必须走 webUtils.getPathForFile。
+   * 非桌面环境返回 ''。
+   */
+  getPathForFile(file: File): string;
   /** 用系统浏览器打开外部链接(只允许 http/https) */
   openUrl(url: string): Promise<void>;
   /** 自绘标题栏按钮(窗口本身是无边框的) */
@@ -391,6 +458,12 @@ export interface ApiSurface {
   setStarred(id: number, starred: boolean): Promise<void>;
   /** 在系统资源管理器里定位该文件 */
   revealInExplorer(id: number): Promise<void>;
+  /**
+   * 用资源管理器打开某个图库里的文件夹。
+   * @param relDir 相对某个图库根的路径;'' 表示图库根目录本身。
+   *   传绝对路径也可以(直接打开),左侧文件夹树用相对路径。
+   */
+  openFolder(relDir: string): Promise<void>;
   /** 用系统默认看图工具打开 */
   openExternal(id: number): Promise<void>;
   /** 复制一个绝对路径到剪贴板 */
@@ -407,6 +480,12 @@ export interface ApiSurface {
   renameImage(id: number, newName: string): Promise<ImageRecord | null>;
   /** 把图片位图写进系统剪贴板,可直接粘贴到别处 */
   copyImageToClipboard(id: number): Promise<void>;
+  /**
+   * 把**去掉元数据**的位图写进剪贴板:图片像素完全一致,但所有
+   * tEXt / iTXt / zTXt 块都被 Electron 重编码时丢掉。
+   * 只进剪贴板,不产生新文件,也不改动原图。
+   */
+  copyImageWithoutMetadata(id: number): Promise<void>;
   /** 复制一份到指定文件夹(原图保留);用户取消返回 null */
   copyImageToFolder(id: number): Promise<{ copiedTo: string } | null>;
   /** 批量删除:全部移入回收站并清索引 */
@@ -427,6 +506,10 @@ export interface ApiSurface {
   // 缩略图
   /** 返回可直接塞进 <img src> 的 URL(file:// 或自定义协议) */
   getThumbUrl(id: number): string;
+  /** 原图 URL:详情预览用(cam-file://file/<id>,只服务库内已索引的图) */
+  getFileUrl(id: number): string;
+  /** 复制任意文本到剪贴板(提示词复制按钮用) */
+  copyText(text: string): Promise<void>;
 
   // 应用
   getAppInfo(): Promise<{
@@ -444,4 +527,31 @@ export interface ApiSurface {
   }>;
   setAutoLaunch(enabled: boolean): Promise<void>;
   quitApp(): Promise<void>;
+
+  // ---- 工作小窗(桌宠)
+  /** 小窗进程要的那一份设置(主题/是否开启/位置/尺寸) */
+  getPetState(): Promise<{
+    enabled: boolean;
+    theme: 'dark' | 'light';
+    iconSize: number;
+    panelSize: { width: number; height: number };
+    position: { x: number; y: number } | null;
+    reduceEffects: boolean;
+    /** 图片优先(左右交替大字图 / 整屏看图,不显示参数文字) */
+    imageFirst: boolean;
+    /** 上次浏览的文件夹(与主界面一致);null = 还没选过 */
+    lastRelDir: string | null;
+  }>;
+  /** 拖动后回写图标位置(主窗口下次打开小窗时沿用) */
+  setPetPosition(position: { x: number; y: number }): Promise<void>;
+  /** 小窗里改设置(图标大小 / 小窗尺寸) */
+  setPetLayout(patch: { iconSize?: number; panelSize?: { width: number; height: number } }): Promise<void>;
+  /** 小窗里点「打开主界面」:唤起主窗口 */
+  focusMainWindow(): Promise<void>;
+  /** 主窗口开关小窗后,通知所有窗口刷新状态 */
+  onPetStateChanged(cb: () => void): () => void;
+  /** 小窗自己调整窗口大小/位置(图标态 ↔ 展开态) */
+  movePetWindow(bounds: { x: number; y: number; width: number; height: number }): Promise<void>;
+  /** 小窗请求关闭自己(退出小窗模式) */
+  closePetWindow(): Promise<void>;
 }

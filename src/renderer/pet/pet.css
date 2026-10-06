@@ -1,0 +1,479 @@
+/**
+ * 工作小窗(桌宠)的样式。
+ *
+ * 这个窗口是**透明**的:页面背景必须完全透明,只有真正的控件有底色,
+ * 否则会在桌面上糊出一整块矩形。
+ */
+
+/* 面板尺寸是"含边框"的:窗口宽度按面板宽度算,不带 border-box 会多出 2px 被窗口裁掉 */
+.pet-panel {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  font: 13px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+  user-select: none;
+  /* 深色方案:让 Chromium 的画布/滚动条也走深色,不会在透明窗口边缘冒出浅色条 */
+  color-scheme: dark;
+  /* 本页永远不显示滚动条(内容自己滚,由 .pet-body 承担) */
+  scrollbar-width: none;
+}
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+#pet-root::-webkit-scrollbar,
+.pet-stage::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+#pet-root {
+  width: 100%;
+  height: 100%;
+}
+
+/* 布局:图标固定在左下角,面板从它上方/右侧展开 */
+.pet-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* 小图标:只有图案本身。
+   不要圆底、不要描边 —— 原图已经带了一圈蓝色图形,再套壳就会出现
+   "深色圆 + 白色圆环" 的双层轮廓。 */
+/* 图标:必须**可点击**。
+   注意不能用 -webkit-app-region: drag —— 那样系统会把点击一起吃掉,
+   真实鼠标点下去不会有任何反应(实测)。拖动改由 JS 做,并按帧节流。 */
+.pet-icon {
+  position: absolute;
+  display: block;
+  padding: 0;
+  border: 0;
+  outline: none;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  cursor: grab;
+  -webkit-app-region: no-drag;
+  touch-action: none;
+  transition: filter 0.14s ease;
+}
+.pet-icon:focus,
+.pet-icon:focus-visible {
+  outline: none;
+}
+.pet-icon:active { cursor: grabbing; }
+.pet-icon:hover {
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.45)) brightness(1.05);
+}
+
+/* 图案填满整个小窗:窗口本身就是 iconSize × iconSize */
+.pet-icon img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: 0;
+  object-fit: contain;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+/* 图标上不再叠加任何装饰(小蓝点也去掉,避免出现第二个轮廓) */
+.pet-icon .pet-dot { display: none; }
+
+/* 展开后的工作窗 */
+/* 面板:不透明深色。
+   为什么不用半透明/跟随主题:这个窗口是**透明置顶**的,面板后面就是用户桌面 ——
+   亮色主题下近白面板叠在浅色桌面上会发灰,文字像"蒙了一层"(实测过)。
+   贴死不透明 + 高对比文字,任何桌面背景上都清晰。 */
+.pet-panel {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 14px;
+  background: #15171d;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+  color: #f2f4f8;
+  animation: pet-panel-in 0.18s ease;
+}
+@keyframes pet-panel-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.pet-panel.closing {
+  animation: pet-panel-out 0.14s ease forwards;
+}
+@keyframes pet-panel-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(8px) scale(0.98); }
+}
+/* 小窗面板固定深色:上面已说明原因,这里把亮色主题的重写去掉 */
+.pet-panel[data-theme='light'] {
+  background: #15171d;
+  border-color: rgba(255, 255, 255, 0.16);
+  color: #f2f4f8;
+}
+
+.pet-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 10px;
+  flex-shrink: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12px;
+}
+.pet-panel[data-theme='light'] .pet-head {
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+}
+.pet-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.pet-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex-shrink: 0;
+  height: 26px;
+  min-width: 26px;
+  padding: 0 7px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pet-panel[data-theme='light'] .pet-btn {
+  border-color: rgba(0, 0, 0, 0.12);
+  background: rgba(0, 0, 0, 0.04);
+}
+.pet-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.pet-panel[data-theme='light'] .pet-btn:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+.pet-btn.primary {
+  background: var(--pet-accent, #4f9cf9);
+  border-color: transparent;
+  color: #fff;
+}
+.pet-btn[disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.pet-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+.pet-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 卡片列表:小窗里只上下翻,所以是单列 */
+.pet-card {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pet-panel[data-theme='light'] .pet-card {
+  border-bottom-color: rgba(0, 0, 0, 0.05);
+}
+.pet-card:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.pet-panel[data-theme='light'] .pet-card:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+.pet-card.active {
+  background: color-mix(in srgb, var(--pet-accent, #4f9cf9) 24%, transparent);
+}
+.pet-thumb {
+  width: 54px;
+  height: 54px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.06);
+}
+.pet-meta {
+  flex: 1;
+  min-width: 0;
+}
+.pet-name {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pet-sub {
+  font-size: 10.5px;
+  color: #b9c0cc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pet-empty {
+  padding: 22px 14px;
+  text-align: center;
+  font-size: 12px;
+  color: #b9c0cc;
+}
+
+/* 大图预览 */
+.pet-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.pet-viewer img {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+  background: rgba(0, 0, 0, 0.25);
+}
+.pet-kv {
+  flex-shrink: 0;
+  max-height: 46%;
+  overflow-y: auto;
+  padding: 8px 10px;
+  font-size: 11px;
+}
+.pet-kv .row {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+}
+.pet-kv .k {
+  flex-shrink: 0;
+  width: 62px;
+  color: #b9c0cc;
+}
+.pet-kv .v {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.pet-kv .prompt {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
+
+/* 设置:二级菜单 */
+.pet-settings {
+  padding: 10px;
+  font-size: 12px;
+}
+.pet-settings h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #b9c0cc;
+}
+.pet-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.pet-panel[data-theme='light'] .pet-row {
+  border-bottom-color: rgba(0, 0, 0, 0.06);
+}
+.pet-row .label {
+  flex: 1;
+}
+.pet-row input[type='range'] {
+  width: 130px;
+  accent-color: var(--pet-accent, #4f9cf9);
+}
+.pet-row .num {
+  width: 44px;
+  text-align: right;
+  font-family: ui-monospace, Consolas, monospace;
+  color: #b9c0cc;
+}
+.pet-hint {
+  margin-top: 10px;
+  font-size: 10.5px;
+  color: #9aa2b1;
+  line-height: 1.6;
+}
+.pet-loading {
+  padding: 14px;
+  text-align: center;
+  font-size: 12px;
+  color: #b9c0cc;
+}
+
+/* ---- 图片优先(左右交替 / 整屏看图) ----
+   目标:小窗里图片是主体,文字只在需要时出现。
+   列表里图片按奇偶行左右交替,行高拉大让缩略图成为视觉重心。 */
+.pet-card.img-first {
+  padding: 6px 8px;
+  gap: 0;
+  align-items: center;
+}
+/* 奇数行把图片放到右边,形成左右交替的节奏 */
+.pet-card.img-first.alt {
+  flex-direction: row-reverse;
+}
+.pet-card.img-first .pet-thumb {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* ---- 文件夹树(主界面同款结构,只显示名字) ----
+   之前是"图标 + 名字 + 路径 + 数量徽章"的卡片行,宽度一窄就互相挤压换行;
+   树形只留名字,缩进表达层级,永远不会挤。 */
+.pet-tree {
+  padding: 4px 6px 8px;
+}
+.pet-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+}
+.pet-tree-arrow {
+  width: 20px;
+  height: 24px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: none;
+  color: #8f97a6;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.pet-tree-name {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.pet-tree-name:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+/* ---- 详情:图片占满,文字可选 ---- */
+.pet-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.pet-stage-img {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.28);
+}
+.pet-panel[data-theme="light"] .pet-stage-img {
+  background: rgba(0, 0, 0, 0.06);
+}
+.pet-stage-img > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: zoom-in;
+}
+/* 参数文字只在展开时才占位置;收起时图片吃满整个面板 */
+.pet-viewer .pet-kv {
+  flex-shrink: 0;
+  max-height: 46%;
+  overflow-y: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+.pet-panel[data-theme="light"] .pet-viewer .pet-kv {
+  border-top-color: rgba(0, 0, 0, 0.08);
+}
+
+/* 左右翻页:平时很淡,悬浮才明显 */
+.pet-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.34);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.42;
+  transition: opacity 0.14s ease, background-color 0.14s ease;
+}
+.pet-nav:hover { opacity: 1; background: rgba(0, 0, 0, 0.55); }
+.pet-nav[disabled] { opacity: 0.12; cursor: default; }
+.pet-nav.prev { left: 6px; }
+.pet-nav.next { right: 6px; }
+.pet-count {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.42);
+  color: #fff;
+  font-size: 10.5px;
+  font-family: ui-monospace, Consolas, monospace;
+}

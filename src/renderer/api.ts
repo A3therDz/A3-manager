@@ -94,6 +94,28 @@ function createHttpApi(): ApiSurface {
     // 操作
     setStarred: (id, starred) => http<void>('POST', `/api/star/${id}`, { starred }),
     revealInExplorer: () => desktopOnly('在资源管理器中定位'),
+    openFolder: () => desktopOnly('打开文件夹所在位置'),
+    inspectFile: () => desktopOnly('解析拖入图片的元数据'),
+    getPathForFile: () => '',
+    copyImageWithoutMetadata: () => desktopOnly('复制无元数据图片'),
+    // 工作小窗只在桌面版有意义;浏览器调试下返回一份静态状态,方便预览界面
+    getPetState: () =>
+      Promise.resolve({
+        enabled: false,
+        theme: 'dark' as const,
+        iconSize: 64,
+        panelSize: { width: 430, height: 620 },
+        position: null,
+        reduceEffects: false,
+        imageFirst: true,
+        lastRelDir: null,
+      }),
+    setPetPosition: () => Promise.resolve(),
+    setPetLayout: () => Promise.resolve(),
+    focusMainWindow: () => Promise.resolve(),
+    onPetStateChanged: () => () => {},
+    movePetWindow: () => Promise.resolve(),
+    closePetWindow: () => Promise.resolve(),
     openExternal: (id) => {
       window.open(`/api/file/${id}`, '_blank');
       return Promise.resolve();
@@ -101,6 +123,9 @@ function createHttpApi(): ApiSurface {
     copyPath: async (id) => {
       const d = await http<ImageDetail>('GET', `/api/image/${id}`);
       await navigator.clipboard.writeText(d.absPath);
+    },
+    copyText: async (text) => {
+      await navigator.clipboard.writeText(text);
     },
     deleteImage: () => desktopOnly('删除图片'),
     moveImage: () => desktopOnly('移动图片'),
@@ -128,6 +153,8 @@ function createHttpApi(): ApiSurface {
 
     // 缩略图:浏览器版直接用原图字节流,由浏览器缩放
     getThumbUrl: (id) => `/api/file/${id}`,
+    // 原图:浏览器调试本来就走 /api/file
+    getFileUrl: (id) => `/api/file/${id}`,
 
     // 应用
     getAppInfo: () => desktopOnly('getAppInfo'),
@@ -144,6 +171,11 @@ if (typeof window !== 'undefined' && !window.api) {
 /** 缩略图 URL。桌面版走自定义协议(并发加载,不走 IPC) */
 export function thumbUrl(id: number): string {
   return window.api.getThumbUrl(id);
+}
+
+/** 原图 URL。详情预览用,清晰度优先(缩略图只有几百像素) */
+export function fileUrl(id: number): string {
+  return window.api.getFileUrl(id);
 }
 
 /** 统一的错误消息提取 */
@@ -215,8 +247,8 @@ export function useStats(): AsyncState<LibraryStats> {
 }
 
 /** 分页浏览:维护 query / 页大小 / 已加载页,支持下拉无限滚动 */
-export function useImages(pageSize = 120) {
-  const [query, setQuery] = useState<ImageQuery>({ sort: 'mtime_desc' });
+export function useImages(pageSize = 120, initialQuery?: ImageQuery) {
+  const [query, setQuery] = useState<ImageQuery>(initialQuery ?? { sort: 'mtime_desc' });
   const [page, setPage] = useState(0);
   const [ids, setIds] = useState<number[]>([]);
   const [total, setTotal] = useState(0);
@@ -224,6 +256,14 @@ export function useImages(pageSize = 120) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tookMs, setTookMs] = useState(0);
+
+  // 已加载 id/行的实时副本:追加去重与原地刷新都要读到"此刻"的值
+  const idsRef = useRef<number[]>([]);
+  const rowsRef = useRef<ImageRecord[]>([]);
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  /** 标签页切换时一次性恢复"上次已加载的范围"(>pageSize 时首页直接拉整段) */
+  const restoreCountRef = useRef(0);
 
   // query 变化时重置到第一页
   useEffect(() => {
@@ -234,22 +274,38 @@ export function useImages(pageSize = 120) {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    // 恢复标签页:首页直接把"上次已加载的范围"整段拉回来,避免一页页重追
+    const limit = page === 0 && restoreCountRef.current > 0 ? restoreCountRef.current : pageSize;
     (async () => {
       try {
         const res: ImageQueryResult = await window.api.queryImages({
           ...query,
           offset: page * pageSize,
-          limit: pageSize,
+          limit,
         });
         if (cancelled) return;
         setTotal(res.total);
         setTookMs(res.tookMs);
-        setIds((prev) => (page === 0 ? res.ids : [...prev, ...res.ids]));
+        // offset 分页的固有漂移:排序头部插入新图后,后面每一页都会重复一段 ——
+        // 追加时按 id 去重,不然同一行渲染两遍,网格会"跳一下"
+        const prevIds = page === 0 ? [] : idsRef.current;
+        const seen = new Set(prevIds);
+        const freshIds = res.ids.filter((x) => !seen.has(x));
         // 只为新出现的那一段取详情,避免整表重取
-        const batch = await window.api.getImagesByIds(res.ids);
+        const batch = await window.api.getImagesByIds(freshIds);
         if (cancelled) return;
         const clean = batch.filter(Boolean) as ImageRecord[];
-        setRows((prev) => (page === 0 ? clean : [...prev, ...clean]));
+        const nextIds = page === 0 ? freshIds : [...prevIds, ...freshIds];
+        const nextRows = page === 0 ? clean : [...rowsRef.current, ...clean];
+        idsRef.current = nextIds;
+        rowsRef.current = nextRows;
+        setIds(nextIds);
+        setRows(nextRows);
+        if (page === 0 && restoreCountRef.current > 0) {
+          // 整段恢复完毕:页码对齐到段尾,loadMore 从正确位置继续
+          restoreCountRef.current = 0;
+          setPage(Math.max(0, Math.ceil(nextIds.length / pageSize) - 1));
+        }
       } catch (e) {
         if (!cancelled) setError(errMsg(e));
       } finally {
@@ -261,6 +317,48 @@ export function useImages(pageSize = 120) {
     };
   }, [query, page, pageSize]);
 
+  /**
+   * 原地刷新:重新拉取"当前已加载范围"的数据并整体替换,
+   * **不重置页码、不动滚动位置** —— 新入库的图立刻出现,但列表不会跳回顶部。
+   * (以前的写法是 setQuery(q=>({...q})),等于推倒重来:页码归零、滚动跳顶,
+   *  扫描 watcher 一触发用户就被甩回第一张。)
+   *
+   * 只为主键列表里没有的 id 取行数据:已加载几千行时,整批重取会
+   * 产生一次大 IPC + 全量 React 行对象重建,新图入库那一下就会卡。
+   * 没变过的行保留原对象引用,卡片组件(memo)直接跳过重渲染。
+   */
+  const refresh = useCallback(async () => {
+    const count = Math.max(pageSize, idsRef.current.length);
+    try {
+      const res: ImageQueryResult = await window.api.queryImages({
+        ...queryRef.current,
+        offset: 0,
+        limit: count,
+      });
+      const known = new Map(rowsRef.current.map((r) => [r.id, r]));
+      const missing = res.ids.filter((id) => !known.has(id));
+      const fetched = missing.length ? await window.api.getImagesByIds(missing) : [];
+      const fresh = new Map(fetched.filter(Boolean).map((r) => [(r as ImageRecord).id, r as ImageRecord]));
+      // 以查询返回的 id 顺序为准:已知的复用旧行,新来的用新行,消失的丢弃
+      const clean = res.ids
+        .map((id) => fresh.get(id) ?? known.get(id))
+        .filter(Boolean) as ImageRecord[];
+      idsRef.current = res.ids;
+      rowsRef.current = clean;
+      setIds(res.ids);
+      setRows(clean);
+      setTotal(res.total);
+      setTookMs(res.tookMs);
+      // 页码与新长度对齐,下一次 loadMore 从正确的位置继续
+      setPage((p) => {
+        const aligned = Math.max(0, Math.ceil(res.ids.length / pageSize) - 1);
+        return aligned === p ? p : aligned;
+      });
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }, [pageSize]);
+
   const hasMore = useMemo(() => rows.length < total, [rows.length, total]);
   const loadMore = useCallback(() => {
     if (!loading && rows.length < total) setPage((p) => p + 1);
@@ -268,27 +366,79 @@ export function useImages(pageSize = 120) {
 
   /** 局部更新某一行(如收藏状态),不触发整批重取 */
   const patchRow = useCallback((id: number, patch: Partial<ImageRecord>) => {
+    rowsRef.current = rowsRef.current.map((r) => (r.id === id ? { ...r, ...patch } : r));
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }, []);
 
   /** 从列表移除某一行(删除/移出图库后),总数同步减一 */
   const removeRow = useCallback((id: number) => {
+    rowsRef.current = rowsRef.current.filter((r) => r.id !== id);
+    idsRef.current = idsRef.current.filter((x) => x !== id);
     setRows((prev) => prev.filter((r) => r.id !== id));
     setIds((prev) => prev.filter((x) => x !== id));
     setTotal((t) => Math.max(0, t - 1));
   }, []);
 
-  return { query, setQuery, ids, rows, total, loading, error, tookMs, hasMore, loadMore, patchRow, removeRow };
+  /**
+   * 标签页切换:换成目标标签的查询,并把它上次已加载的范围一次性拉回来
+   * (首页 limit = loadedCount,而不是从第一页 120 张重新追)。
+   */
+  const restore = useCallback((q: ImageQuery, loadedCount: number) => {
+    restoreCountRef.current = Math.max(pageSize, loadedCount);
+    setQuery(q);
+  }, [pageSize]);
+
+  return { query, setQuery, ids, rows, total, loading, error, tookMs, hasMore, loadMore, refresh, restore, patchRow, removeRow };
 }
 
 /** 扫描进度订阅 */
 export function useScanProgress(): ScanProgress | null {
   const [p, setP] = useState<ScanProgress | null>(null);
   useEffect(() => {
-    const off = window.api.onScanProgress(setP);
+    /**
+     * 进行中(walking/parsing)的进度事件很密,每次都 setState 会让整个 App
+     * (含整张网格)跟着重渲染。这里把进行中的更新节流到 ~4Hz;
+     * 阶段切换与 done/error/cancelled 永远立刻透传,不丢终态。
+     */
+    let last = 0;
+    let pending: ScanProgress | null = null;
+    let timer = 0;
+    const flush = () => {
+      timer = 0;
+      if (pending) {
+        setP(pending);
+        pending = null;
+      }
+    };
+    const push = (next: ScanProgress) => {
+      const terminal = next.phase !== 'walking' && next.phase !== 'parsing';
+      if (terminal) {
+        window.clearTimeout(timer);
+        timer = 0;
+        pending = null;
+        last = Date.now();
+        setP(next);
+        return;
+      }
+      const now = Date.now();
+      if (now - last >= 250) {
+        last = now;
+        window.clearTimeout(timer);
+        timer = 0;
+        pending = null;
+        setP(next);
+      } else {
+        pending = next;
+        if (!timer) timer = window.setTimeout(flush, 250 - (now - last));
+      }
+    };
+    const off = window.api.onScanProgress(push);
     // 先取一次当前状态,避免订阅前的进度丢失
-    window.api.getScanProgress().then(setP).catch(() => undefined);
-    return off;
+    window.api.getScanProgress().then(push).catch(() => undefined);
+    return () => {
+      window.clearTimeout(timer);
+      off();
+    };
   }, []);
   return p;
 }

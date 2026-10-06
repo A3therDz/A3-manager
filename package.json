@@ -1,7 +1,7 @@
 {
   "name": "comfy-asset-manager",
   "productName": "A3 manager",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "description": "A3 manager —— 本地图片资产管理器(ComfyUI / A1111 / NovelAI):文件夹浏览、缩略图网格、完整生成参数",
   "private": true,
   "type": "module",
@@ -17,7 +17,7 @@
     "thumbs": "node --experimental-strip-types tools/thumb-sync.ts",
     "gallery": "node --experimental-strip-types tools/export-gallery.ts",
     "inspect": "node tools/inspect.js",
-    "verify": "node --experimental-strip-types tools/verify-syntax.ts && node --experimental-strip-types tools/verify-contract.ts && node --experimental-strip-types tools/verify-category.ts && node --experimental-strip-types tools/verify-thumb-e2e.ts && node --experimental-strip-types tools/verify-webpage.ts",
+    "verify": "node --experimental-strip-types tools/verify-syntax.ts && node --experimental-strip-types tools/verify-contract.ts && node --experimental-strip-types tools/verify-category.ts && node --experimental-strip-types tools/verify-thumb-e2e.ts && node --experimental-strip-types tools/verify-webpage.ts && node --experimental-strip-types tools/verify-improvements.ts && node --experimental-strip-types tools/verify-recursive-dir.ts && node --experimental-strip-types tools/verify-v06.ts",
     "verify:http": "node --experimental-strip-types tools/verify-http.ts",
     "verify:manage": "node --experimental-strip-types tools/verify-manage.ts",
     "dev": "vite",
@@ -45,7 +45,9 @@
   "build": {
     "appId": "com.comfyasset.manager",
     "productName": "A3 manager",
-    "directories": { "output": "release" },
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "dist/**/*",
       "package.json",
@@ -54,10 +56,20 @@
       "tools/png-reader.cjs"
     ],
     "electronDist": "node_modules/electron/dist",
-    "electronLanguages": ["zh-CN", "en-US"],
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
     "win": {
       "signAndEditExecutable": false,
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "artifactName": "${productName}-${version}-setup.${ext}"
     },
     "nsis": {

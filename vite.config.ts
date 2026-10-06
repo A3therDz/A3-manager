@@ -42,5 +42,13 @@ export default defineConfig({
     outDir: path.join(dir, 'dist/renderer'),
     emptyOutDir: true,
     target: 'chrome120',
+    rollupOptions: {
+      input: {
+        // 主窗口
+        index: path.join(dir, 'index.html'),
+        // 工作小窗(桌宠):独立入口,避免把整个主界面塞进小窗
+        pet: path.join(dir, 'pet.html'),
+      },
+    },
   },
 });

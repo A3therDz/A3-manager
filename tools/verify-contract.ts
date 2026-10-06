@@ -127,8 +127,12 @@ if (!ifaceMatch) {
    * 这些方法不走 ipcMain.handle,因此不该出现在通道列表里:
    *   onScanProgress  —— 订阅语义,由主进程 webContents.send('scan:progress') 推送
    *   getThumbUrl     —— 纯前端拼接,不走 IPC(直接生成 cam-thumb:// URL)
+   *   getPathForFile  —— 同步取值:preload 用 webUtils.getPathForFile 从 File 对象里
+   *                      直接拿真实磁盘路径,没有任何 IPC 往返
+   *   onPetStateChanged —— 订阅语义:小窗/主窗口监听 pet:stateChanged 推送
+   *   getFileUrl     —— 纯前端拼接,不走 IPC(生成 cam-file:// URL,由协议处理器服务原图)
    */
-  const NON_HANDLE = new Set(['onScanProgress', 'getThumbUrl']);
+  const NON_HANDLE = new Set(['onScanProgress', 'getThumbUrl', 'getPathForFile', 'onPetStateChanged', 'getFileUrl']);
   const notInMain = apiMethods.filter((m) => !NON_HANDLE.has(m) && !channels.has(m));
   const extraChannels = [...channels].filter((c) => !apiMethods.includes(c));
 
@@ -145,6 +149,8 @@ if (!ifaceMatch) {
   const mainSrc2 = fs.readFileSync(path.join(PROJECT, 'src/main/index.ts'), 'utf8');
   if (mainSrc2.includes("webContents.send('scan:progress'")) good("进度推送 webContents.send('scan:progress') 存在");
   else bad("缺少 scan:progress 推送");
+  if (mainSrc2.includes('pet:stateChanged')) good('小窗状态推送 pet:stateChanged 存在');
+  else bad('缺少 pet:stateChanged 推送');
 
   if (extraChannels.length) good(`主进程额外注册的通道(不在 ApiSurface 里): ${extraChannels.join(', ')}`);
 }

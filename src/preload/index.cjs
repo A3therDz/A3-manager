@@ -10,7 +10,7 @@
  * 免得主进程新增通道时前端在不知情的情况下拿到新方法。
  */
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 /** 调用一个 IPC 通道并拆包统一返回值 */
 async function call(channel, ...args) {
@@ -47,6 +47,18 @@ const api = {
   setFolderPref: (rootId, relDir, patch) => call('setFolderPref', rootId, relDir, patch),
   pickDirectory: () => call('pickDirectory'),
   pickImageFile: () => call('pickImageFile'),
+  inspectFile: (p) => call('inspectFile', p),
+  /**
+   * 拖进来的 File 对象在渲染层只有 name/path 信息,拿不到真实绝对路径,
+   * 必须走 Electron 的 webUtils.getPathForFile(新版已经没有 File.path 了)。
+   */
+  getPathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file) || '';
+    } catch {
+      return '';
+    }
+  },
   openUrl: (url) => call('openUrl', url),
   windowMinimize: () => call('windowMinimize'),
   windowToggleMaximize: () => call('windowToggleMaximize'),
@@ -68,12 +80,15 @@ const api = {
   // ---- 操作
   setStarred: (id, starred) => call('setStarred', id, starred),
   revealInExplorer: (id) => call('revealInExplorer', id),
+  openFolder: (relDir) => call('openFolder', relDir),
   openExternal: (id) => call('openExternal', id),
   copyPath: (id) => call('copyPath', id),
+  copyText: (text) => call('copyText', text),
   deleteImage: (id) => call('deleteImage', id),
   moveImage: (id) => call('moveImage', id),
   renameImage: (id, newName) => call('renameImage', id, newName),
   copyImageToClipboard: (id) => call('copyImageToClipboard', id),
+  copyImageWithoutMetadata: (id) => call('copyImageWithoutMetadata', id),
   copyImageToFolder: (id) => call('copyImageToFolder', id),
   deleteImages: (ids) => call('deleteImages', ids),
   moveImages: (ids, targetDir) => call('moveImages', ids, targetDir),
@@ -88,11 +103,26 @@ const api = {
   // 空主机名形式)都会被 Chromium 规范化为 IPv4 地址(8061 -> 0.0.31.152),
   // 主进程解析不到 id,缩略图全部 400。
   getThumbUrl: (id) => `cam-thumb://thumb/${id}`,
+  // 原图:详情预览要清晰度,缩略图只有几百像素
+  getFileUrl: (id) => `cam-file://file/${id}`,
 
   // ---- 应用
   getAppInfo: () => call('getAppInfo'),
   setAutoLaunch: (enabled) => call('setAutoLaunch', enabled),
   quitApp: () => call('quitApp'),
+
+  // ---- 工作小窗(桌宠)
+  getPetState: () => call('getPetState'),
+  setPetPosition: (position) => call('setPetPosition', position),
+  setPetLayout: (patch) => call('setPetLayout', patch),
+  focusMainWindow: () => call('focusMainWindow'),
+  onPetStateChanged: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('pet:stateChanged', listener);
+    return () => ipcRenderer.removeListener('pet:stateChanged', listener);
+  },
+  movePetWindow: (bounds) => call('movePetWindow', bounds),
+  closePetWindow: () => call('closePetWindow'),
 };
 
 contextBridge.exposeInMainWorld('api', api);

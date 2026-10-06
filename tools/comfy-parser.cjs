@@ -16,9 +16,83 @@ const MAX_DEPTH = 24;
 
 const SAMPLER_TYPES = /^(KSampler|KSamplerAdvanced|SamplerCustom|SamplerCustomAdvanced)$/;
 const CHECKPOINT_TYPES = /^(CheckpointLoader(Simple)?|UNETLoader|DiffusionModelLoader|GGUFLoader|ImageOnlyCheckpointLoader|CheckpointLoaderNF4)$/;
-const LORA_TYPES = /LoraLoader/i;
+// LoraLoader / Lora Loader (LoraManager) / LoraTag 之类都算
+const LORA_TYPES = /lora\s*loader|lora\s*manager|loratag/i;
 const CONTROLNET_TYPES = /(ControlNetApply|ControlNetLoader)/i;
 const TEXT_TYPES = /^(CLIPTextEncode|BNK_CLIPTextEncodeAdvanced|CLIPTextEncodeSDXL|CLIPTextEncodeFlux|TextEncodeQwenImageEdit|T5TextEncode|PromptExpansion)$/;
+
+/**
+ * 自定义节点的"文本字段"识别。
+ *
+ * 实测坑(2026-03):Qwen-Image / 第三方提示词插件的图里,**根本没有 CLIPTextEncode**,
+ * 提示词放在自定义节点的普通字符串输入里,例如:
+ *   WeiLinPromptUI      -> positive / negative
+ *   PromptSelector      -> selected_prompts
+ *   TextBox1            -> text1
+ *   Lora Loader (LoraManager) -> text = "<lora:名字:权重>"
+ * 以前只认 TEXT_TYPES 白名单,这类图就会"提示词 0 条、LoRA 0 条"。
+ * 这里改成:字段名在下面的名单里、且值不是链接引用,就当作提示词候选。
+ */
+const PROMPT_FIELD_NAMES = /^(text|text1|text2|text_?g?|positive|negative|pos|neg|prompt|prompts|selected_?prompts|positive_?prompt|negative_?prompt|system_?prompt|user_?prompt|value|content)$/i;
+/** 明显不是提示词的大字段(编辑器内部状态、序列化 token、随机种子模板…),不能当提示词 */
+const PROMPT_FIELD_EXCLUDE = /^(temp_str|random_?template|separator|title|label|_meta|extra_pnginfo|workflow|model_?name|filename_?prefix|caption_?file_?extension)$/i;
+/** 单块提示词上限:挡住把编辑器内部状态误当提示词的情况(正常提示词都远小于此) */
+const MAX_PROMPT_FIELD = 4000;
+
+/** 这个字段名像不像提示词 */
+function isPromptFieldName(key) {
+  const k = String(key || '').trim();
+  if (!k) return false;
+  if (PROMPT_FIELD_EXCLUDE.test(k)) return false;
+  return PROMPT_FIELD_NAMES.test(k);
+}
+
+/** 采集一个节点自己的字符串输入(不含走链接的输入) */
+function ownPromptTexts(node) {
+  const out = [];
+  const inputs = node && node.inputs;
+  if (!inputs || typeof inputs !== 'object') return out;
+  for (const [k, v] of Object.entries(inputs)) {
+    if (typeof v !== 'string') continue;
+    if (!isPromptFieldName(k)) continue;
+    const t = v.trim();
+    if (!t || t.length > MAX_PROMPT_FIELD) continue;
+    out.push({ text: t, field: k });
+  }
+  return out;
+}
+
+/** 顺着输入链接往上找,收集所有"像提示词"的字符串字段 */
+function collectPromptTexts(nodes, nodeId, depth, out, seen) {
+  if (depth > MAX_DEPTH) return out;
+  if (seen.has(nodeId)) return out;
+  seen.add(nodeId);
+  const node = nodes.get(nodeId);
+  if (!node) return out;
+
+  for (const item of ownPromptTexts(node)) {
+    out.push({ nodeId: node.id, nodeType: node.type, text: item.text, field: item.field });
+  }
+
+  const inputs = node.inputs;
+  if (!inputs || typeof inputs !== 'object') return out;
+  for (const [k, v] of Object.entries(inputs)) {
+    // 只跟"像提示词"的输入往下走,避免沿无关链路扩散
+    if (!isPromptFieldName(k) && !/concat|join|merge|prompt/i.test(node.type)) continue;
+    if (Array.isArray(v) && v.length === 2 && typeof v[0] === 'string') {
+      collectPromptTexts(nodes, v[0], depth + 1, out, seen);
+    }
+  }
+  return out;
+}
+
+/** 从字段名/节点名猜这块文本是正向还是负向 */
+function roleHintOf(block) {
+  const key = (block.field || '') + ' ' + (block.nodeType || '');
+  if (/negative|neg(?![a-z])|uc\b|uncond/i.test(key)) return 'negative';
+  if (/positive|pos(?![a-z])/i.test(key)) return 'positive';
+  return null;
+}
 const LATENT_TYPES = /(EmptyLatentImage|EmptySD3LatentImage|EmptyLatentImagePresets)/i;
 
 const KNOWN_SAMPLERS = [
@@ -389,16 +463,100 @@ function extractModel(nodes, samplerNodeId) {
   return { modelName: chosen.v, modelNodeType: chosen.t };
 }
 
+/**
+ * 从**提示词文本**里抽 <lora:名字:权重> 并返回清干净的文本。
+ *
+ * 为什么正/负提示词都要扫:
+ *   个别工作流(含 A1111)会把 LoRA 标签写在负向提示词里,
+ *   只看正向会漏掉真正加载的 LoRA,同时把标签原样留在提示词里很难看。
+ *
+ * 名字允许带 ':'(某些 LoRA 文件名里有),所以权重用"末尾的可选数字段"来认,
+ * 而不是简单按冒号切分。
+ */
+function extractLoraTokens(text, nodeId) {
+  const loras = [];
+  const out = String(text == null ? '' : text).replace(
+    /<lora:([^>]+?)(?::(-?\d+(?:\.\d+)?))?(?::(-?\d+(?:\.\d+)?))?\s*>/gi,
+    (_all, rawName, a, b) => {
+      // 名字里可能还带冒号:把"结尾是数字"的那几段剥出来当权重
+      let name = String(rawName || '').trim();
+      let w1 = a === undefined ? null : Number(a);
+      let w2 = b === undefined ? null : Number(b);
+      if (w1 === null) {
+        const tail = /^(.*):\s*(-?\d+(?:\.\d+)?)$/.exec(name);
+        if (tail) {
+          name = tail[1].trim();
+          w1 = Number(tail[2]);
+        }
+      }
+      name = name.replace(/[\s,]+$/, '').trim();
+      if (!name) return '';
+      loras.push({
+        name,
+        strengthModel: w1 === null || Number.isNaN(w1) ? null : w1,
+        strengthClip: w2 === null || Number.isNaN(w2) ? null : w2,
+        nodeId: nodeId || 'text',
+      });
+      return '';
+    }
+  );
+  return { loras, text: out };
+}
+
+/** 合并两批 LoRA:同名的以已有的(结构更可信)为准,只补新名字 */
+function mergeLoras(primary, extra) {
+  const seen = new Set(primary.map((l) => l.name));
+  const out = primary.slice();
+  for (const l of extra) {
+    if (seen.has(l.name)) continue;
+    seen.add(l.name);
+    out.push(l);
+  }
+  return out;
+}
+
+/** 提示词文本清理:去掉残留的空行、重复逗号、多余空格 */
+function tidyPromptText(text) {
+  return String(text == null ? '' : text)
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/,[ \t]*,+/g, ',')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^[\s,]+/, '')
+    .replace(/[\s,]+$/, '')
+    .trim();
+}
+
 function extractLoras(nodes) {
   const out = [];
+  const push = (name, sm, sc, nodeId) => {
+    const nm = String(name == null ? '' : name).trim();
+    if (!nm) return;
+    if (out.some((x) => x.name === nm)) return;
+    out.push({ name: nm, strengthModel: sm, strengthClip: sc, nodeId });
+  };
+
   for (const n of nodes.values()) {
     if (!LORA_TYPES.test(n.type)) continue;
-    const name = str(resolveValue(nodes, n.id, 'lora_name', 0, new Set()));
-    if (!name) continue;
-    const sm = num(resolveValue(nodes, n.id, 'strength_model', 0, new Set()));
-    const sc = num(resolveValue(nodes, n.id, 'strength_clip', 0, new Set()));
-    if (out.some((x) => x.name === name && x.strengthModel === sm && x.strengthClip === sc)) continue;
-    out.push({ name, strengthModel: sm, strengthClip: sc, nodeId: n.id });
+
+    // 形态 A:标准 LoraLoader —— 名字在 lora_name(可能是链接,要回溯)
+    const name = str(resolveValue(nodes, n.id, 'lora_name', 0, new Set()))
+      || str(resolveValue(nodes, n.id, 'name', 0, new Set()));
+    if (name) {
+      push(
+        name,
+        num(resolveValue(nodes, n.id, 'strength_model', 0, new Set())),
+        num(resolveValue(nodes, n.id, 'strength_clip', 0, new Set())),
+        n.id
+      );
+      continue;
+    }
+
+    // 形态 B:Lora Loader (LoraManager) —— 名字写在 text 里的 <lora:名字:权重> 串
+    const inline = ownPromptTexts(n).map((x) => x.text).join(' ');
+    if (!inline) continue;
+    for (const l of extractLoraTokens(inline, n.id).loras) {
+      push(l.name, l.strengthModel, l.strengthClip, n.id);
+    }
   }
   return out;
 }
@@ -419,13 +577,30 @@ function extractControlNets(nodes) {
 }
 
 function extractPromptsFromGraph(nodes) {
+  /** 候选块:{ text, encoders, nodeId, roleHint } */
   const texts = [];
+  const addText = (text, encoders, nodeId, roleHint) => {
+    const t = String(text == null ? '' : text).trim();
+    if (!t) return;
+    if (t.length > MAX_PROMPT_FIELD) return;
+    if (texts.some((x) => x.text === t)) return;
+    texts.push({ text: t, encoders, nodeId, roleHint: roleHint || null });
+  };
+
+  // 1) 标准 CLIPTextEncode 一族
   for (const n of nodes.values()) {
     if (!TEXT_TYPES.test(n.type)) continue;
-    const v = str(resolveValue(nodes, n.id, 'text', 0, new Set()));
-    if (!v || !v.trim()) continue;
-    if (texts.some((t) => t.text === v)) continue;
-    texts.push({ text: v, encoders: [n.type], nodeId: n.id });
+    addText(str(resolveValue(nodes, n.id, 'text', 0, new Set())), [n.type], n.id, null);
+  }
+
+  // 2) 自定义提示词节点(没有 CLIPTextEncode 的工作流靠这一段)
+  for (const n of nodes.values()) {
+    if (TEXT_TYPES.test(n.type)) continue;
+    const blocks = collectPromptTexts(nodes, n.id, 0, [], new Set());
+    for (const b of blocks) {
+      // 同一块文本可能既被自己采到、又被上游重复采到,靠 addText 里的去重兜住
+      addText(b.text, [b.nodeType], b.nodeId, roleHintOf(b));
+    }
   }
 
   // 优先用采样器的 positive/negative 输入回溯定位,比关键词猜测可靠
@@ -435,23 +610,39 @@ function extractPromptsFromGraph(nodes) {
     if (!SAMPLER_TYPES.test(n.type)) continue;
     for (const pair of [['pos', 'positive'], ['neg', 'negative']]) {
       for (const t of walkBack(nodes, n.id, pair[1], 0, [], new Set())) {
-        if (TEXT_TYPES.test(t.type)) (pair[0] === 'pos' ? posIds : negIds).add(t.id);
+        if (TEXT_TYPES.test(t.type) || ownPromptTexts(t).length > 0) {
+          (pair[0] === 'pos' ? posIds : negIds).add(t.id);
+        }
       }
     }
   }
 
   const out = [];
+  const collected = [];
   for (const t of texts) {
+    // 纯 LoRA 标签(如 LoraManager 节点里的 "<lora:x:1.0>")不是提示词:
+    // 摘掉标签后如果几乎空了,就只把 LoRA 收走,不产出提示词块。
+    const loraScan = extractLoraTokens(t.text, 'text');
+    const loraStripped = loraScan.text;
+    if (loraScan.loras.length > 0) {
+      collected.push(...loraScan.loras);
+      if (!loraStripped.trim()) continue;
+      t.text = loraStripped;
+    }
     let role;
     if (posIds.has(t.nodeId) && !negIds.has(t.nodeId)) role = 'positive';
     else if (negIds.has(t.nodeId) && !posIds.has(t.nodeId)) role = 'negative';
+    else if (t.roleHint === 'positive' && !negIds.has(t.nodeId)) role = 'positive';
+    else if (t.roleHint === 'negative' && !posIds.has(t.nodeId)) role = 'negative';
     else {
       const low = t.text.toLowerCase();
       role = NEGATIVE_HINTS.some((h) => low.includes(h)) && t.text.length < 2000 ? 'negative' : 'positive';
     }
     out.push({ role, text: t.text, encoders: t.encoders });
   }
-  return out.sort((a, b) => (a.role === b.role ? 0 : a.role === 'positive' ? -1 : 1));
+  out.sort((a, b) => (a.role === b.role ? 0 : a.role === 'positive' ? -1 : 1));
+  out.textLoras = collected;
+  return out;
 }
 
 function extractLatentSize(nodes) {
@@ -495,6 +686,16 @@ function parseGraph(graph, dimensions, rawJson) {
   const loras = extractLoras(nodes);
   const controlNets = extractControlNets(nodes);
   const prompts = extractPromptsFromGraph(nodes);
+  // 提示词里带出来的 LoRA(例如 LoraManager 的 text 字段)并进总表
+  const textLoras = (prompts && prompts.textLoras) || [];
+  if (textLoras.length) {
+    const seen = new Set(loras.map((x) => x.name));
+    for (const l of textLoras) {
+      if (seen.has(l.name)) continue;
+      seen.add(l.name);
+      loras.push(l);
+    }
+  }
   const nodeTypes = [...new Set([...nodes.values()].map((n) => n.type).filter(Boolean))];
 
   let source = 'comfyui';
@@ -598,24 +799,17 @@ function parseA1111(raw, dimensions) {
   posText = posText.replace(/[\n,]+$/, '').trim();
   negText = negText.replace(/[\n,]+$/, '').trim();
 
-  // 3) 从提示词抽 <lora:名字:权重>
-  const loraRe = /<lora:([^:>]+):([-\d.]+)(?::([-\d.]+))?>/gi;
-  for (const m of posText.matchAll(loraRe)) {
-    meta.loras.push({
-      name: m[1],
-      strengthModel: Number(m[2]),
-      strengthClip: m[3] !== undefined ? Number(m[3]) : null,
-      nodeId: 'a1111',
-    });
+  // 3) 从提示词抽 <lora:名字:权重>:正向、负向都要扫
+  const posLora = extractLoraTokens(posText, 'a1111');
+  const negLora = extractLoraTokens(negText, 'a1111');
+  for (const l of [...posLora.loras, ...negLora.loras]) {
+    if (meta.loras.some((x) => x.name === l.name)) continue;
+    meta.loras.push(l);
   }
-  const cleanPos = posText
-    .replace(loraRe, '')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/,\s*,/g, ',')
-    .replace(/[\n,]+$/, '')
-    .trim();
+  const cleanPos = tidyPromptText(posLora.text);
+  const cleanNeg = tidyPromptText(negLora.text);
   if (cleanPos) meta.prompts.push({ role: 'positive', text: cleanPos, encoders: ['A1111'] });
-  if (negText) meta.prompts.push({ role: 'negative', text: negText, encoders: ['A1111'] });
+  if (cleanNeg) meta.prompts.push({ role: 'negative', text: cleanNeg, encoders: ['A1111'] });
 
   // 4) 采样参数
   const steps = num(params['Steps']);
@@ -825,6 +1019,7 @@ function parseUiWorkflow(wf, rawJson) {
     });
   }
 
+  const uiTextLoras = [];
   for (const n of nodes) {
     if (!TEXT_TYPES.test(String(n.type || ''))) continue;
     const w = n.widgets_values;
@@ -834,9 +1029,25 @@ function parseUiWorkflow(wf, rawJson) {
     if (meta.prompts.some((p) => p.text === v)) continue;
     const low = v.toLowerCase();
     const isNeg = NEGATIVE_HINTS.some((h) => low.includes(h)) && v.length < 2000;
-    meta.prompts.push({ role: isNeg ? 'negative' : 'positive', text: v, encoders: [String(n.type || '')] });
+    const role = isNeg ? 'negative' : 'positive';
+    const r = extractLoraTokens(v, 'text');
+    uiTextLoras.push(...r.loras);
+    const cleaned = tidyPromptText(r.text);
+    if (!cleaned) continue;
+    meta.prompts.push({ role, text: cleaned, encoders: [String(n.type || '')] });
   }
+  meta.loras = mergeLoras(meta.loras, uiTextLoras);
   meta.prompts.sort((a, b) => (a.role === b.role ? 0 : a.role === 'positive' ? -1 : 1));
+
+  // 节点图里没有 LoraLoader,但提示词文本里有 <lora:...> 的情况同样要认出来
+  const textLoras = [];
+  for (const p of meta.prompts) {
+    const r = extractLoraTokens(p.text, 'text');
+    p.text = tidyPromptText(r.text);
+    textLoras.push(...r.loras);
+  }
+  meta.loras = mergeLoras(meta.loras, textLoras);
+  meta.prompts = meta.prompts.filter((p) => p.text.length > 0);
 
   meta.customNodeHints = meta.nodeTypes.filter((t) => !isCoreNode(t));
   if (!meta.sampler && !meta.modelName && meta.prompts.length === 0) meta.source = 'comfyui-partial';
@@ -867,15 +1078,66 @@ function parseNovelAI(text) {
   const modelName = src.replace(/\s+[0-9a-f]{6,}$/i, '').trim();
   meta.modelName = modelName || null;
 
-  const positive =
-    typeof json.prompt === 'string' && json.prompt.trim()
+  /** NAI 的 caption 可能直接是字符串,也可能是 {base_caption, char_captions} */
+  const readCaption = (v) => {
+    if (typeof v === 'string') return { base: v, chars: [] };
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return { base: '', chars: [] };
+    const base = typeof v.base_caption === 'string' ? v.base_caption : '';
+    const chars = Array.isArray(v.char_captions)
+      ? v.char_captions
+          .map((c) => {
+            if (typeof c === 'string') return c;
+            if (c && typeof c === 'object' && typeof c.char_caption === 'string') return c.char_caption;
+            return '';
+          })
+          .filter((t) => t && t.trim())
+      : [];
+    return { base, chars };
+  };
+
+  const v4 = readCaption(json.v4_prompt && json.v4_prompt.caption);
+  const v4neg = readCaption(json.v4_negative_prompt && json.v4_negative_prompt.caption);
+
+  const positive = v4.base.trim()
+    ? v4.base
+    : typeof json.prompt === 'string' && json.prompt.trim()
       ? json.prompt
       : typeof text['Description'] === 'string'
         ? text['Description']
         : '';
-  const negative = typeof json.uc === 'string' ? json.uc : '';
-  if (positive.trim()) meta.prompts.push({ role: 'positive', text: positive.trim() });
-  if (negative.trim()) meta.prompts.push({ role: 'negative', text: negative.trim() });
+  const negative = v4neg.base.trim()
+    ? v4neg.base
+    : typeof json.uc === 'string'
+      ? json.uc
+      : '';
+
+  // 角色提示词单独成块(role='character'),不混进正向提示词
+  let charCaptions = v4.chars;
+  // 兼容旧结构 / 其它工具写出的 characterPrompts 数组
+  if (charCaptions.length === 0 && Array.isArray(json.characterPrompts)) {
+    charCaptions = json.characterPrompts
+      .map((c) => {
+        if (typeof c === 'string') return c;
+        if (c && typeof c === 'object' && typeof c.char_caption === 'string') return c.char_caption;
+        return '';
+      })
+      .filter((t) => t && t.trim());
+  }
+
+  const pushClean = (role, rawText, label) => {
+    const r = extractLoraTokens(rawText, 'novelai');
+    const cleaned = tidyPromptText(r.text);
+    if (!cleaned) return;
+    for (const l of r.loras) {
+      if (meta.loras.some((x) => x.name === l.name)) continue;
+      meta.loras.push(l);
+    }
+    meta.prompts.push(label ? { role, text: cleaned, label } : { role, text: cleaned });
+  };
+
+  pushClean('positive', positive);
+  charCaptions.forEach((c, i) => pushClean('character', c, `角色 ${i + 1}`));
+  pushClean('negative', negative);
 
   const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   const sampler = {
@@ -1017,4 +1279,6 @@ module.exports = {
   extractModel,
   extractLoras,
   extractPromptsFromGraph,
+  extractLoraTokens,
+  tidyPromptText,
 };

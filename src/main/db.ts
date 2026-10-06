@@ -162,6 +162,12 @@ CREATE INDEX IF NOT EXISTS idx_images_dims         ON images(width, height);
 CREATE INDEX IF NOT EXISTS idx_images_starred      ON images(starred) WHERE starred = 1;
 CREATE INDEX IF NOT EXISTS idx_images_path         ON images(abs_path);
 
+-- 库级键值对(目前只存 meta_version:解析器口径版本)
+CREATE TABLE IF NOT EXISTS kv (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS lora_refs (
   image_id    INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
   name        TEXT NOT NULL,
@@ -470,6 +476,59 @@ export class AssetDb {
     return { id, created };
   }
 
+  /** 读库级键值(不存在返回 null) */
+  getKv(key: string): string | null {
+    try {
+      const row = this.db.prepare('SELECT value FROM kv WHERE key = ?').get(key) as
+        | { value: string }
+        | undefined;
+      return row ? row.value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 写库级键值 */
+  setKv(key: string, value: string): void {
+    try {
+      this.db
+        .prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+        .run(key, value);
+    } catch {
+      /* 老库没能建出 kv 表时忽略:下次启动会重建 */
+    }
+  }
+
+  /**
+   * 某个图库根的"目录树签名"(见 indexer.ts 的 TreeSignature)。
+   *
+   * 存在 kv 表里,不新增表结构:老库不需要迁移,读不到就当"没有签名",
+   * 顶多多走一次完整遍历 —— 行为退回到以前,不会出错。
+   */
+  getTreeSignature(rootId: number): { count: number; rootMtime: number } | null {
+    const raw = this.getKv('tree_sig_' + rootId);
+    if (!raw) return null;
+    try {
+      const v = JSON.parse(raw) as { count?: unknown; rootMtime?: unknown };
+      if (typeof v.count !== 'number' || typeof v.rootMtime !== 'number') return null;
+      return { count: v.count, rootMtime: v.rootMtime };
+    } catch {
+      return null;
+    }
+  }
+
+  setTreeSignature(rootId: number, sig: { count: number; rootMtime: number }): void {
+    this.setKv('tree_sig_' + rootId, JSON.stringify(sig));
+  }
+
+  /** 某个图库根当前索引到的行数(用来判断"要不要做第一次扫描") */
+  countImages(rootId: number): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS c FROM images WHERE root_id = ?').get(rootId) as
+      | { c: number }
+      | undefined;
+    return row ? row.c : 0;
+  }
+
   deleteImagesNotIn(rootId: number, keepRelPaths: Set<string>): number {
     const rows = this.db.prepare('SELECT id, rel_path FROM images WHERE root_id = ?').all(rootId) as Array<{
       id: number; rel_path: string;
@@ -525,14 +584,36 @@ export class AssetDb {
 
     if (q.rootId !== undefined) push('i.root_id = ?', q.rootId);
 
-    if (q.relDir !== undefined && q.relDir !== '') {
+    // 空串 / null 一律当作"没有目录筛选"(否则 null 会被拼成 LIKE 'null%')
+    const relDir = q.relDir;
+    if (relDir !== undefined && relDir !== null && relDir !== '') {
       if (q.relDirRecursive) {
-        // 转义只作用于 base,末尾的 % 必须保持为通配符:
-        // 写成 escapeLike(base) + '!%' 会让 ! 把 % 转义成字面百分号,永远匹配不到。
-        const base = String(q.relDir).replace(/[\\/]+$/, '');
-        push(`(i.rel_dir = ? OR i.rel_dir LIKE ? ESCAPE '!')`, base, `${escapeLike(base)}%`);
+        /**
+         * 「这个文件夹**及其所有子目录**里的图」—— 点左侧文件夹树就是看这个(v0.6)。
+         *
+         * 三个必须一起满足的细节:
+         *  1. 末尾的 `%` 必须保持通配符,只转义 base 里的元字符
+         *     (写成 escapeLike(base) + '!%' 会让 ! 把 % 转义成字面百分号,永远匹配不到);
+         *  2. 分隔符**必须跟着模式走**:`A\B` 的子孙是 `A\B\C`,而 `A` 的子孙是 `A\B`;
+         *     统一用 `\` 的话 `A/%` 就一个都匹配不到;
+         *  3. 通配符必须紧跟分隔符:`A%` 会把**兄弟目录** `AB`、`A2` 一起算进来
+         *     (索引里 rel_dir = 'AB' 并不是 'A' 的子目录)。所以是 `A` 或 `A\%`。
+         */
+        const base = String(relDir).replace(/[\\/]+$/, '');
+        if (base === '') {
+          // 根目录:'' 的子孙就是所有非空 rel_dir,不用再加目录条件
+          parts.push(`i.rel_dir <> ''`);
+        } else {
+          // 两种分隔符各一条:库里写的是反斜杠,但 / 也认(跨平台导入过的库)
+          push(
+            `(i.rel_dir = ? OR i.rel_dir LIKE ? ESCAPE '!' OR i.rel_dir LIKE ? ESCAPE '!')`,
+            base,
+            descPattern(base, '\\'),
+            descPattern(base, '/')
+          );
+        }
       } else {
-        push('i.rel_dir = ?', q.relDir);
+        push('i.rel_dir = ?', relDir);
       }
     }
 
@@ -1245,4 +1326,18 @@ export class AssetDb {
 /** 转义 LIKE 模式里的元字符。与 SQL 里的 ESCAPE '!' 配对使用。 */
 function escapeLike(s: string): string {
   return s.replace(/[!%_]/g, (c) => '!' + c);
+}
+
+/**
+ * 「base 目录下所有子孙」的 LIKE 模式(配合 ESCAPE '!')。
+ *
+ * 关键:通配符前必须紧跟一个**字面分隔符**,即 base + sep + '%'。
+ * 若只写 base + '%',`A%` 会把兄弟目录 `AB`、`A2` 一起匹配进来 ——
+ * 它们路径前缀相同,但不是 A 的子目录(这是 v0.6 修掉的一个真实 bug)。
+ *
+ * 分隔符是字面字符(反斜杠 / 正斜杠),不是 LIKE 元字符,所以不用转义;
+ * 只有 base 自己需要走 escapeLike。
+ */
+function descPattern(base: string, sep: '\\' | '/'): string {
+  return `${escapeLike(base)}${sep}%`;
 }

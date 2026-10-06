@@ -11,13 +11,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CategoryNode, FolderNode } from '@shared/types';
 import { errMsg } from '../api';
+import { endImageDrag, isImageDrag, readImageDragIds } from '../dnd';
 
 /** 文件夹树只需要文件夹相关字段 */
 interface FolderTreeProps {
   folders: FolderNode[];
   activeDir: string | null;
   onPickDir: (relDir: string | null) => void;
-  /** 右键文件夹(重命名备注 / 隐藏) */
+  /** 双击文件夹 = 用资源管理器打开它在磁盘上的位置(不改变左侧筛选) */
+  onOpenFolder?: (node: FolderNode) => void;
+  /** 右键文件夹(打开位置 / 重命名备注 / 隐藏) */
   onContextMenu?: (node: FolderNode, x: number, y: number) => void;
 }
 
@@ -30,6 +33,8 @@ interface CategoryTreeProps {
   onChanged: () => void;
   /** 轻提示 */
   notify: (msg: string, bad?: boolean) => void;
+  /** 把网格里拖过来的图片加入这个分类(v0.6);不传 = 无拖放能力 */
+  onDropImage?: (categoryId: number, imageIds: number[]) => void;
 }
 
 /** 收集分类节点及其所有后代 id(用于递归筛选与计数) */
@@ -39,6 +44,30 @@ export function withDescendants(node: CategoryNode): number[] {
   return out;
 }
 
+/**
+ * 文件夹图标(v0.6 需求 6)。
+ *
+ * 为什么做成图标:以前文件夹行只是"一行文字 + 右边一个数字",和图片卡片一样
+ * 灰扑扑的,一眼看不出这是**文件夹**。加一个实心的文件夹图标之后,
+ * 左侧拦一眼就能分出"文件夹"和"图片",也更容易点。
+ */
+export function FolderIcon({ size = 13, open = false }: { size?: number; open?: boolean }) {
+  return (
+    <svg
+      className="cam-folder-ico"
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {/* 打开时把"盖子"微微掀起来,和树里的 ▾ 是一个意思 */}
+      <path d={open ? 'M1.6 6.2h12.8L13 13.1H3z' : 'M1.6 6.2h12.8v6.9H1.6z'} />
+      <path d="M1.6 3.1h4.2l1.5 2.1h6v1h-11.7z" opacity=".75" />
+    </svg>
+  );
+}
+
 function Row({
   label,
   count,
@@ -46,7 +75,16 @@ function Row({
   active,
   hint,
   title,
+  /** 左侧图标:文件夹树传 <FolderIcon />,分类树不传(靠缩进与文字区分) */
+  icon,
+  /** 展开/折叠的箭头(和文字分开,避免"▸名字"挤在一起) */
+  caret,
+  /** 点箭头:只负责展开/折叠,不切换筛选 */
+  onToggle,
+  /** 这一层只有自己一个文件夹时,不画引导线(少一层视觉噪音) */
+  onlyChild,
   onContextMenu,
+  onDoubleClick,
   onClick,
 }: {
   label: string;
@@ -55,13 +93,20 @@ function Row({
   active: boolean;
   hint?: string;
   title?: string;
+  icon?: React.ReactNode;
+  caret?: '▾' | '▸';
+  onToggle?: () => void;
+  onlyChild?: boolean;
   onContextMenu?: (x: number, y: number) => void;
+  onDoubleClick?: () => void;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
+      className={`cam-treerow${active ? ' on' : ''}${icon ? ' folder' : ''}`}
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
       onContextMenu={
         onContextMenu
           ? (e) => {
@@ -72,34 +117,77 @@ function Row({
       }
       title={title ?? label}
       style={{
-        display: 'block',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
         width: '100%',
         textAlign: 'left',
-        padding: `4px 12px 4px ${12 + depth * 12}px`,
+        padding: `4px 12px 4px ${10 + depth * 12}px`,
         background: active ? 'var(--accent-soft)' : 'transparent',
         border: 0,
         borderLeft: active ? '2px solid var(--accent)' : '2px solid transparent',
         color: active ? 'var(--accent)' : 'var(--fg)',
         font: 'inherit',
-        fontSize: 12,
         cursor: 'pointer',
         whiteSpace: 'nowrap',
         overflow: 'hidden',
-        textOverflow: 'ellipsis',
       }}
     >
-      <span style={{ float: 'right', color: 'var(--muted)', fontSize: 11 }}>{count}</span>
-      {label}
-      {hint ? <span style={{ marginLeft: 6, color: 'var(--muted)', fontSize: 10 }}>{hint}</span> : null}
+      {/* 引导线:让层级一眼可见 */}
+      {depth > 0 ? (
+        <span
+          className="cam-tree-guide"
+          aria-hidden="true"
+          style={{ opacity: onlyChild ? 0.35 : 1, marginLeft: -6 }}
+        />
+      ) : null}
+
+      {onToggle ? (
+        <span
+          className="cam-tree-caret"
+          role="button"
+          aria-label={caret === '▾' ? '折叠' : '展开'}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle();
+          }}
+        >
+          {caret ?? '▸'}
+        </span>
+      ) : (
+        // 没有子目录时留出等宽空位,同级文字才不会左右错开
+        <span className="cam-tree-caret cam-tree-caret-empty" aria-hidden="true" />
+      )}
+
+      {icon}
+
+      <span className="cam-tree-label">{label}</span>
+      {hint ? <span className="cam-tree-hint">{hint}</span> : null}
+      <span className="cam-tree-count">{count}</span>
     </button>
   );
 }
 
-export function FolderTree({ folders, activeDir, onPickDir, onContextMenu }: FolderTreeProps) {
+export function FolderTree({ folders, activeDir, onPickDir, onOpenFolder, onContextMenu }: FolderTreeProps) {
   // 展开状态:默认展开第一层
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
   const total = useMemo(() => folders.reduce((s, f) => s + f.totalCount, 0), [folders]);
+  /**
+   * 每个目录是不是"父目录唯一的孩子"。
+   * 用来少画一层引导线:图库根下只有一个日期目录时,那一竖线纯属噪音。
+   */
+  const onlyChildMap = useMemo(() => {
+    const m = new Map<string, boolean>();
+    const walk = (nodes: FolderNode[], parentHasOne: boolean) => {
+      for (const n of nodes) {
+        m.set(`${n.rootId}|${n.relDir}`, parentHasOne);
+        walk(n.children || [], nodes.length === 1);
+      }
+    };
+    walk(folders, false);
+    return m;
+  }, [folders]);
 
   const walk = (nodes: FolderNode[], depth: number) => {
     const out: JSX.Element[] = [];
@@ -111,19 +199,30 @@ export function FolderTree({ folders, activeDir, onPickDir, onContextMenu }: Fol
       if (n.hidden && depth > 0) continue;
       const diskName = n.relDir === '' ? `[${n.rootLabel}]` : n.relDir.split(/[\\/]/).pop() || n.relDir;
       const label = n.alias ? n.alias : diskName;
+      const toggle = hasKids ? () => setOpen((o) => ({ ...o, [key]: !isOpen })) : undefined;
       out.push(
         <div key={key}>
           <Row
-            label={`${hasKids ? (isOpen ? '▾ ' : '▸ ') : '  '}${label}`}
+            label={label}
             count={n.totalCount}
             depth={depth}
             active={activeDir === n.relDir && n.relDir !== ''}
             hint={n.alias ? '备注' : undefined}
-            title={n.alias ? `${n.alias}(${diskName})` : diskName}
+            icon={<FolderIcon open={hasKids && isOpen} />}
+            caret={hasKids ? (isOpen ? '▾' : '▸') : undefined}
+            onToggle={toggle}
+            onlyChild={depth > 0 && onlyChildMap.get(key) === true}
+            title={
+              (n.alias ? `${n.alias}(${diskName})` : diskName) +
+              '\n单击筛选(含所有子目录) · 双击打开所在位置 · 右键更多'
+            }
+            onDoubleClick={onOpenFolder ? () => onOpenFolder(n) : undefined}
             onContextMenu={
               onContextMenu ? (x, y) => onContextMenu(n, x, y) : undefined
             }
             onClick={() => {
+              // 点点在行上:该收就收、该开就开,然后照样切到这个目录。
+              // (以前只能靠点箭头,行本身点了不展开,和文件夹树的习惯不一样)
               if (hasKids) setOpen((o) => ({ ...o, [key]: !isOpen }));
               onPickDir(n.relDir === '' ? null : n.relDir);
             }}
@@ -145,6 +244,7 @@ export function FolderTree({ folders, activeDir, onPickDir, onContextMenu }: Fol
         count={total}
         depth={0}
         active={activeDir === null}
+        icon={<FolderIcon open />}
         onClick={() => onPickDir(null)}
       />
       {walk(folders, 0)}
@@ -269,7 +369,7 @@ export function FolderVisibilityTree({
   );
 }
 
-export function CategoryTree({ categories, activeCat, onPickCat, onChanged, notify }: CategoryTreeProps) {
+export function CategoryTree({ categories, activeCat, onPickCat, onChanged, notify, onDropImage }: CategoryTreeProps) {
   const [open, setOpen] = useState<Record<number, boolean>>({});
   // 新建:点「+ 新建」展开一个内联输入框(Electron 不支持 window.prompt)
   const [creating, setCreating] = useState(false);
@@ -279,8 +379,21 @@ export function CategoryTree({ categories, activeCat, onPickCat, onChanged, noti
   const [editName, setEditName] = useState('');
   const [confirmId, setConfirmId] = useState<number | null>(null);
   const confirmTimer = useRef(0);
+  // 拖放:当前悬停在哪一行(高亮用)+ 进出深度(判断"真的离开了这一行")
+  const [dragOverCat, setDragOverCat] = useState<number | null>(null);
+  const dragLeaveDepth = useRef(0);
 
   useEffect(() => () => window.clearTimeout(confirmTimer.current), []);
+
+  /** 拖放高亮:进入某一行时点亮,离开时熄灭 */
+  const markDragOver = (id: number) => {
+    dragLeaveDepth.current = 0;
+    setDragOverCat((cur) => (cur === id ? cur : id));
+  };
+  const clearDragOver = () => {
+    setDragOverCat(null);
+    dragLeaveDepth.current = 0;
+  };
 
   const totalAll = useMemo(
     () => categories.reduce((s, c) => s + c.totalCount, 0),
@@ -357,7 +470,58 @@ export function CategoryTree({ categories, activeCat, onPickCat, onChanged, noti
               style={{ ...inlineInput, marginLeft: 12 + depth * 12 }}
             />
           ) : (
-            <div className="cam-cat-row" style={{ display: 'flex', alignItems: 'center' }}>
+            <div
+              className="cam-cat-row"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                borderRadius: 6,
+                // 拖到这一行上方:整行发光,松手就加入这个分类
+                boxShadow: dragOverCat === n.id ? 'inset 0 0 0 2px var(--accent)' : undefined,
+                background: dragOverCat === n.id ? 'var(--accent-soft)' : undefined,
+              }}
+              onDragOver={
+                onDropImage
+                  ? (e) => {
+                      // 只接受"从网格里拖过来的卡片",文件拖入窗口的解析流程不受影响
+                      if (!isImageDrag(e.dataTransfer)) return;
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = 'copy';
+                      markDragOver(n.id);
+                    }
+                  : undefined
+              }
+              onDragEnter={
+                onDropImage
+                  ? (e) => {
+                      if (!isImageDrag(e.dataTransfer)) return;
+                      dragLeaveDepth.current += 1;
+                      markDragOver(n.id);
+                    }
+                  : undefined
+              }
+              onDragLeave={
+                onDropImage
+                  ? () => {
+                      dragLeaveDepth.current -= 1;
+                      if (dragLeaveDepth.current <= 0) clearDragOver();
+                    }
+                  : undefined
+              }
+              onDrop={
+                onDropImage
+                  ? (e) => {
+                      if (!isImageDrag(e.dataTransfer)) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const ids = readImageDragIds(e.dataTransfer);
+                      endImageDrag();
+                      clearDragOver();
+                      if (ids.length) onDropImage(n.id, ids);
+                    }
+                  : undefined
+              }
+            >
               <div style={{ flex: 1, minWidth: 0 }}>
                 <Row
                   label={`${hasKids ? (isOpen ? '▾ ' : '▸ ') : '  '}${n.name}`}
@@ -366,6 +530,11 @@ export function CategoryTree({ categories, activeCat, onPickCat, onChanged, noti
                   active={activeCat === n.id}
                   // 绑定了源文件夹的分类会标出来,与"纯虚拟分组"区分
                   hint={n.relDir ? '·文件夹' : undefined}
+                  title={
+                    onDropImage
+                      ? `${n.name}\n单击筛选 · 可以把网格里的图片拖到这一行加入分类`
+                      : n.name
+                  }
                   onClick={() => {
                     if (hasKids) setOpen((o) => ({ ...o, [n.id]: !isOpen }));
                     onPickCat(activeCat === n.id ? null : n.id);
