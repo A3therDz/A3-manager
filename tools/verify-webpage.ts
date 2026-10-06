@@ -135,10 +135,10 @@ const missFields = REQUIRED.filter((f) => !html.includes(f));
 if (missFields.length === 0) good(`需求字段齐全 (${REQUIRED.length} 项)`);
 else bad(`缺少字段: ${missFields.join('、')}`);
 
-// 采样器必须已移除(只看正文,不看注释)
+// 采样器必须展示(v0.7 起恢复;只看正文,不看注释)
 const noComments = html.replace(/<!--[\s\S]*?-->/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
-if (noComments.includes('采样器')) bad('页面出现「采样器」—— 用户已要求移除');
-else good('未展示采样器(符合用户要求)');
+if (noComments.includes('采样器')) good('页面展示了采样器(v0.7 起恢复)');
+else bad('页面缺少「采样器」—— v0.7 起必须展示该字段');
 
 // 数据缺失兜底
 if (html.includes('未记录')) good('有「未记录」兜底');

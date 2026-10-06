@@ -227,8 +227,8 @@ console.log('\n=== 5b) 渲染层结构检查 ===');
   }
   good('渲染层未直接引用 Electron / Node 内置模块');
 
-  // 采样器:用户已明确要求从界面移除,这里做成护栏防止回流。
-  // 注意要先剥掉注释 —— 代码里有一句"采样器已按用户要求移除"的说明,那是文档不是 UI。
+  // 采样器:v0.7 起恢复展示(数据层一直有,此前仅按当时需求隐藏),这里做成护栏防止回流。
+  // 注意要先剥掉注释 —— 文件头有"采样器自 v0.7 起恢复展示"的说明,那是文档不是 UI。
   const DETAIL = path.join(PROJECT, 'src/renderer/components/DetailPanel.tsx');
   if (fs.existsSync(DETAIL)) {
     const d = fs.readFileSync(DETAIL, 'utf8');
@@ -238,12 +238,12 @@ console.log('\n=== 5b) 渲染层结构检查 ===');
       .filter((l) => !/^\s*(\/\/|\*)/.test(l)) // 行注释与 JSDoc 续行
       .join('\n');
     if (codeOnly.includes('采样器')) {
-      bad('DetailPanel 的代码里出现「采样器」—— 用户已明确要求移除该字段');
+      good('DetailPanel 展示了采样器(v0.7 起恢复,注释中的说明不计)');
     } else {
-      good('DetailPanel 未展示采样器(符合用户要求,注释中的说明不计)');
+      bad('DetailPanel 的代码里没有「采样器」—— v0.7 起必须展示该字段');
     }
     // 需求里明确要展示的字段必须都在(同样只看代码)
-    const REQUIRED_FIELDS = ['像素尺寸', '模型', '调度器', '步数', 'CFG', 'seed', 'LoRA', '正向提示词', '负向提示词', '生成日期'];
+    const REQUIRED_FIELDS = ['像素尺寸', '模型', '采样器', '调度器', '步数', 'CFG', 'seed', 'LoRA', '正向提示词', '负向提示词', '生成日期'];
     const missing = REQUIRED_FIELDS.filter((f2) => !codeOnly.includes(f2));
     if (missing.length === 0) good(`详情面板包含全部需求字段(${REQUIRED_FIELDS.length} 项)`);
     else bad(`详情面板缺少字段: ${missing.join('、')}`);

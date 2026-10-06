@@ -24,8 +24,8 @@
    后端已验证通过,你只做 `src/renderer/`。
 3. **不要发明新的 `window.api.*` 方法。** 只有 `ApiSurface` 里声明的那 28 个可用。
    调用不存在的方法,`tools/verify-contract.ts` 会直接报 FAIL。
-4. **不要展示"采样器"。** 用户明确要求移除该字段(`samplerName` 仍在契约里,
-   但界面上不得出现)。`tools/verify-contract.ts` 有护栏会检查这一点。
+4. **必须展示"采样器"。** v0.7 起恢复展示该字段(`samplerName` 在契约里,
+   详情面板「模型」与「调度器」之间)。`tools/verify-contract.ts` 有护栏会检查这一点。
 5. **数据缺失必须显示"未记录"**,不能留空。约 39% 的图没有调度器、22% 没有负向提示词,
    这是数据本身的常态,不是 bug。
 6. **不要用 `as any` / `@ts-ignore` 绕过类型。** `npm run typecheck` 必须 0 错误。
@@ -91,7 +91,7 @@ ImageRecord   // 列表项:id / fileName / relDir / absPath / fileSize / fileMti
               //         dimensions / starred / source / meta(部分字段)
 ImageDetail   // 详情:ImageRecord + siblings / position / total + 完整 meta
 GenerationMeta// modelName / sampler / loras[] / controlNets[] / prompts[]
-SamplerParams // steps / cfg / seed / denoise / scheduler  ← 注意没有 samplerName 的使用
+SamplerParams // steps / cfg / seed / denoise / scheduler / samplerName(v0.7 起展示)
 LoraEntry     // name / strengthModel / strengthClip / nodeId
 PromptBlock   // role: 'positive' | 'negative' / text
 Category      // 用户自定义分类:id / name / relDir / parentId / sortOrder / imageCount
@@ -133,13 +133,13 @@ thumbUrl(id)       // 缩略图 URL(走 cam-thumb:// 自定义协议)
 ### 详情面板字段(精确等于需求,不多不少)
 
 ```
-像素尺寸 | 模型 | 调度器 | 步数 | CFG | seed
+像素尺寸 | 模型 | 采样器 | 调度器 | 步数 | CFG | seed
 LoRA 及权重(列表,显示 name + strengthModel,clip 不同时额外显示)
 正向提示词 | 负向提示词(等宽字体、可滚动、保留换行)
 文件信息:文件名 / 文件夹 / 体积 / 生成日期 / 来源格式 / 所属分类
 ```
 
-**明确不要**:**采样器**。也不要加"画质评分""推荐"之类用户没要求的字段。
+不要加"画质评分""推荐"之类用户没要求的字段。
 
 ### 交互(与 `web/index.html` 保持一致)
 
@@ -193,8 +193,8 @@ npm start                # Electron 托盘版能起、能关到托盘、能退
 `npm run verify` 会检查:
 
 - 你调用的每个 `window.api.*` 是否存在于契约
-- 详情面板是否含全部 10 个需求字段
-- 是否误加了"采样器"
+- 详情面板是否含全部 11 个需求字段(含采样器)
+- 是否漏了"采样器"(v0.7 起必须展示)
 - 是否有"未记录"兜底
 - 内嵌 JS / JSX 结构
 
@@ -245,5 +245,6 @@ LoRA        4625 张含 LoRA,共 44610 条引用,509 个唯一 LoRA
 ```
 
 **采样器的说明**:因 rgthree 的 `ParameterControlPanel.inputs.pcp_ui` 为空字符串、
-`widgets_values` 只存 UI 默认值而非运行时值,**采样器无法可靠还原**,用户已同意不显示。
-契约里保留该字段只是为将来兼容,界面上不得出现。
+`widgets_values` 只存 UI 默认值而非运行时值,约 39% 的图**没有采样器记录**,
+这些图显示「未记录」——正常,不是 bug。**v0.7 起详情面板恢复展示采样器**,
+契约里的 `samplerName` 字段一直在,只是此前按当时需求未上界面。

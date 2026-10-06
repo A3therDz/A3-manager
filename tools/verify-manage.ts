@@ -243,10 +243,10 @@ console.log('\n--- 5) 无依赖版页面是否真的带这些入口 ---');
     if (html.includes(needle)) good(`页面含 ${why}`);
     else bad(`页面缺少 ${why} (${needle})`);
   }
-  // 不能出现"采样器"这个字段的展示(用户已要求移除)
+  // 页面必须展示「采样器」字段(v0.7 起恢复展示,护栏防止被移除)
   const bodyOnly = html.replace(/<!--[\s\S]*?-->/g, '');
-  if (bodyOnly.includes('采样器')) bad('页面里出现了「采样器」字样 —— 用户已要求移除');
-  else good('页面未展示采样器(符合用户要求)');
+  if (bodyOnly.includes('采样器')) good('页面展示了采样器(v0.7 起恢复)');
+  else bad('页面缺少「采样器」字样 —— v0.7 起必须展示该字段');
 }
 
 console.log('\n' + (failures === 0 ? 'OVERALL: PASS' : `OVERALL: FAIL (${failures} 项)`));

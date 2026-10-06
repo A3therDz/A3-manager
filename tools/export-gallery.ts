@@ -136,6 +136,7 @@ interface Item {
   h: number | null;
   source: string;
   model: string | null;
+  sampler: string | null;
   scheduler: string | null;
   steps: number | null;
   cfg: number | null;
@@ -195,6 +196,7 @@ const items: Item[] = rows.map((r) => {
     h: r.dimensions ? r.dimensions.height : null,
     source: r.source,
     model: m?.modelName ?? null,
+    sampler: s?.samplerName ?? null,
     scheduler: s?.scheduler ?? null,
     steps: s?.steps ?? null,
     cfg: s?.cfg ?? null,
@@ -744,6 +746,7 @@ function open(idx){
   const params = [
     kv('像素尺寸', it.w && it.h ? it.w + ' × ' + it.h : '', !(it.w && it.h)),
     kv('模型', it.model || '', !it.model),
+    kv('采样器', it.sampler || '', !it.sampler),
     kv('调度器', it.scheduler || '', !it.scheduler),
     kv('步数', it.steps === null ? '' : String(it.steps), it.steps === null),
     kv('CFG', it.cfg === null ? '' : String(it.cfg), it.cfg === null),

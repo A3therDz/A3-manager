@@ -34,6 +34,7 @@ interface Item {
   source: string;
   model: string | null;
   scheduler: string | null;
+  sampler: string | null;
   steps: number | null;
   cfg: number | null;
   seed: number | null;
@@ -119,9 +120,9 @@ for (const k of REQUIRED) {
   console.log(`  ${k.padEnd(10)} ${String(present).padStart(5)} / ${D.items.length}  ${pct.toFixed(1)}%`);
 }
 
-// 详情面板必须不含采样器字段
-if (!('sampler' in (D.items[0] as unknown as Record<string, unknown>))) good('详情面板已不含 sampler 字段(符合用户要求)');
-else bad('items 里仍有 sampler 字段');
+// 详情面板必须含采样器字段(v0.7 起恢复展示)
+if ('sampler' in (D.items[0] as unknown as Record<string, unknown>)) good('导出 items 含 sampler 字段(详情面板展示采样器)');
+else bad('items 缺少 sampler 字段 —— 详情面板无法展示采样器');
 
 // ---------------- 3) 图片路径可读性
 console.log('\n--- 图片路径可读性(抽样 20)---');

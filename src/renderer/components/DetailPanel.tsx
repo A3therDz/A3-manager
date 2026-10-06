@@ -7,10 +7,11 @@
  *      所以收藏 / 分类 / 路径复制这些需要 id 的操作一律不出现。
  *
  * 字段严格对齐需求:
- *   尺寸 / 模型 / 调度器 / 步数 / CFG / seed / LoRA 及权重 / 正负提示词 / 角色提示词 / 生成日期
+ *   尺寸 / 模型 / 采样器 / 调度器 / 步数 / CFG / seed / LoRA 及权重 / 正负提示词 / 角色提示词 / 生成日期
  *
  * 重要约定(实测结论,见 design/METADATA-FORMATS.md):
- *   - 采样器字段按用户要求不展示。
+ *   - 采样器自 v0.7 起恢复展示(数据层一直有,此前仅按当时需求隐藏);
+ *     约 39% 的图(rgthree 面板类工作流)没有采样器记录,会显示"未记录"——正常。
  *   - 调度器只有约 61% 的图有记录(如果没有记录就显示"未记录")。
  *   - 尺寸一律用 dimensions(IHDR 实测值),不要用 A1111 的 Size(那是请求尺寸)。
  *   - NovelAI v4+ 的角色提示词是独立的一块(role='character'),
@@ -380,6 +381,7 @@ export function DetailPanel({
                 v={dimensions ? `${dimensions.width} × ${dimensions.height}` : null}
               />
               <KV k="模型" v={m?.modelName ?? null} />
+              <KV k="采样器" v={s?.samplerName ?? null} />
               <KV k="调度器" v={s?.scheduler ?? null} />
               <KV k="步数" v={s?.steps ?? null} />
               <KV k="CFG" v={s?.cfg ?? null} />

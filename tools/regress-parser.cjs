@@ -33,7 +33,7 @@ if (files.length === 0) {
 
 const s = {
   n: 0, err: 0, dims: 0, model: 0, steps: 0, cfg: 0, seed: 0,
-  sched: 0, pos: 0, neg: 0, loraFiles: 0, loraCount: 0, multi: 0,
+  samplerName: 0, sched: 0, pos: 0, neg: 0, loraFiles: 0, loraCount: 0, multi: 0,
 };
 const src = {};
 
@@ -56,6 +56,7 @@ for (const f of files) {
     if (x.steps !== null) s.steps++;
     if (x.cfg !== null) s.cfg++;
     if (x.seed !== null) s.seed++;
+    if (x.samplerName) s.samplerName++;
     if (x.scheduler) s.sched++;
   }
   if (m.prompts.some((p) => p.role === 'positive')) s.pos++;
@@ -81,6 +82,7 @@ console.log(`  模型名      ${pct(s.model)}`);
 console.log(`  步数        ${pct(s.steps)}`);
 console.log(`  CFG         ${pct(s.cfg)}`);
 console.log(`  seed        ${pct(s.seed)}`);
+console.log(`  采样器      ${pct(s.samplerName)}`);
 console.log(`  调度器      ${pct(s.sched)}`);
 console.log(`  正向提示词  ${pct(s.pos)}`);
 console.log(`  负向提示词  ${pct(s.neg)}`);

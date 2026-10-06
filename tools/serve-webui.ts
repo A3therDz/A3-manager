@@ -10,7 +10,7 @@
  *
  * 已实现:
  *   浏览  搜索 / 模型筛选 / 5 种排序 / 分类与文件夹侧栏 / 滚动加载
- *   详情  参数面板(尺寸/模型/调度器/步数/CFG/seed/LoRA/正负提示词/日期/所属分类)
+ *   详情  参数面板(尺寸/模型/采样器/调度器/步数/CFG/seed/LoRA/正负提示词/日期/所属分类)
  *   管理  收藏、新建分类、重命名、删除、把图加入/移出分类  ← 本轮补齐
  *
  * 用法:
@@ -413,6 +413,7 @@ async function open(idx){
     + '<div class="sec"><h3>采样参数</h3><table class="kv"><tbody>'
       + kv('像素尺寸', d.dimensions?(d.dimensions.width+' × '+d.dimensions.height):null)
       + kv('模型', m.modelName)
+      + kv('采样器', s?s.samplerName:null)
       + kv('调度器', s?s.scheduler:null)
       + kv('步数', s?s.steps:null)
       + kv('CFG', s?s.cfg:null)
