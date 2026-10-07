@@ -54,7 +54,8 @@ mustNotHave('src/renderer/main.tsx', '.cam-card {\n    animation', '卡片不再
 mustNotHave('src/renderer/main.tsx', '@keyframes cam-in', '抽掉了 cam-in 关键帧');
 mustNotHave('src/renderer/main.tsx', 'animation-delay: calc(var(--i', '抽掉了错峰延迟');
 mustNotHave('src/renderer/main.tsx', '.cam-detail { margin: 0; animation', '详情面板不再有进场位移动画');
-mustHave('src/renderer/main.tsx', 'cam-detail.closing { animation: cam-slide-out', '详情面板退场动画保留(有始有终)');
+mustHave('src/renderer/main.tsx', 'transition: width var(--dur-3) var(--ease)', '详情面板退场保留(槽位宽度回收,有始有终)');
+mustNotHave('src/renderer/main.tsx', 'cam-slide-out', '详情退场不再叠加位移动画(v0.7:与槽位宽度回收重复,已去重)');
 
 console.log('\n=== A2) 需求 2:拖卡片 = 加入分类;拖预览图不再弹解析层 ===');
 for (const f of ['src/renderer/dnd.ts']) {

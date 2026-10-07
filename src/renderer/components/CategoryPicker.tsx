@@ -24,13 +24,15 @@ interface Props {
   imageIds: number[];
   /** 传当前归属(预勾选,批量时取交集)= 指派模式,可增可移;省略 = 追加模式,只加不移 */
   initialChecked?: number[];
+  /** 正在播退场动画:父组件在延迟卸载期间把它传进来,根节点挂 .closing */
+  closing?: boolean;
   onClose: () => void;
   /** 应用成功(或新建了分类)后回调,父组件负责刷新分类树与归属 */
   onApplied: () => void;
   notify: (msg: string, bad?: boolean) => void;
 }
 
-export function CategoryPicker({ categories, imageIds, initialChecked, onClose, onApplied, notify }: Props) {
+export function CategoryPicker({ categories, imageIds, initialChecked, closing = false, onClose, onApplied, notify }: Props) {
   const [checked, setChecked] = useState<Set<number>>(() => new Set(initialChecked ?? []));
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -115,16 +117,14 @@ export function CategoryPicker({ categories, imageIds, initialChecked, onClose, 
 
   return (
     <div
-      className="cam-modal"
+      className={`cam-modal${closing ? ' closing' : ''}`}
       onClick={(e) => {
         if (e.target === e.currentTarget && !busy) onClose();
       }}
     >
+      {/* 背景/描边/圆角/投影统一由 .cam-modal > div 的玻璃规则提供,这里只留布局 */}
       <div
         style={{
-          background: 'var(--panel)',
-          border: '1px solid var(--border)',
-          borderRadius: 10,
           width: 420,
           maxHeight: '70vh',
           display: 'flex',
@@ -205,10 +205,10 @@ export function CategoryPicker({ categories, imageIds, initialChecked, onClose, 
             }}
             style={{
               flex: 1,
-              background: 'var(--panel2)',
-              border: '1px solid var(--border)',
+              background: 'var(--ctl-bg)',
+              border: '1px solid var(--ctl-border)',
               color: 'var(--fg)',
-              borderRadius: 6,
+              borderRadius: 'var(--radius-md)',
               padding: '5px 9px',
               font: 'inherit',
               fontSize: 12,
@@ -238,10 +238,10 @@ export function CategoryPicker({ categories, imageIds, initialChecked, onClose, 
 }
 
 const btn: React.CSSProperties = {
-  background: 'var(--panel2)',
-  border: '1px solid var(--border)',
+  background: 'var(--ctl-bg)',
+  border: '1px solid var(--ctl-border)',
   color: 'var(--fg)',
-  borderRadius: 5,
+  borderRadius: 'var(--radius-md)',
   padding: '3px 12px',
   cursor: 'pointer',
   font: 'inherit',

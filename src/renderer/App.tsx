@@ -18,6 +18,7 @@ import { ImageGrid } from './components/ImageGrid';
 import { DetailPanel } from './components/DetailPanel';
 import { CategoryPicker } from './components/CategoryPicker';
 import { endImageDrag, hasImageDragData, isInternalImageDrag } from './dnd';
+import { prefersReducedMotion, useDelayedClose } from './useDelayedClose';
 
 /** 设置面板里的滑动开关:左选项 / 右选项,滑块平滑移动 */
 function SlideSwitch({
@@ -139,62 +140,9 @@ function SortIcon() {
 }
 
 /**
- * 浮层的"有始有终"卸载。
- *
- * 问题:React 里把 state 置空,元素当帧就没了 —— 进场动画有,退场永远是"啪"地消失。
- * 做法:关闭时先只标记 closing(让退场关键帧跑完),等 CLOSE_MS 之后再真正卸载。
- * 中间态由返回值里的 closing 暴露给 CSS 用。
+ * 浮层的"有始有终"卸载(useDelayedClose)已抽到 ./useDelayedClose,
+ * 本文件与 DetailPanel 里的弹层共用同一套。
  */
-const CLOSE_MS = 160;
-
-function prefersReducedMotion(): boolean {
-  try {
-    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  } catch {
-    return false;
-  }
-}
-
-function useDelayedClose<T>() {
-  const [value, setValue] = useState<T | null>(null);
-  const [closing, setClosing] = useState(false);
-  const timer = useRef(0);
-
-  const close = useCallback(() => {
-    setClosing((already) => {
-      if (already) return true;
-      // 用户要求减少动画时直接卸载,不给无意义的等待
-      if (prefersReducedMotion()) {
-        setValue(null);
-        return false;
-      }
-      window.clearTimeout(timer.current);
-      timer.current = window.setTimeout(() => {
-        setValue(null);
-        setClosing(false);
-      }, CLOSE_MS);
-      return true;
-    });
-  }, []);
-
-  const open = useCallback((v: T) => {
-    window.clearTimeout(timer.current);
-    setClosing(false);
-    setValue(v);
-  }, []);
-
-  const toggle = useCallback(
-    (next: T | null) => {
-      if (next === null) close();
-      else open(next);
-    },
-    [close, open]
-  );
-
-  useEffect(() => () => window.clearTimeout(timer.current), []);
-
-  return { value, closing, open, close, toggle };
-}
 
 /** 浮层锚点:右键的点击坐标,或「更多」按钮的右下角 */
 interface MenuAnchor {
@@ -431,14 +379,14 @@ export function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const detail = useImageDetail(selectedId);
 
-  // 轻提示(收藏/分类/文件操作的结果反馈)
-  const [toast, setToast] = useState<{ msg: string; bad: boolean } | null>(null);
+  // 轻提示(收藏/分类/文件操作的结果反馈):展示 2200ms 后先播退场动画,再卸载
+  const { value: toast, closing: toastClosing, open: openToast, close: closeToast } = useDelayedClose<{ msg: string; bad: boolean }>();
   const toastTimer = useRef(0);
   const notify = useCallback((msg: string, bad = false) => {
-    setToast({ msg, bad });
+    openToast({ msg, bad });
     window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), 2200);
-  }, []);
+    toastTimer.current = window.setTimeout(closeToast, 2200);
+  }, [openToast, closeToast]);
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
   // ---- 设置:主题(暗/亮) + 关闭行为(缩小到托盘/直接关闭)
@@ -462,12 +410,13 @@ export function App() {
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
   // 渲染后测量定位:与卡片右键菜单共用同一套逻辑(右对齐按钮 + 下方不足向上翻转)
   const moreMenuPos = useAnchoredMenuPos(moreMenu, moreMenuRef, 'right');
-  const [aliasTarget, setAliasTarget] = useState<FolderNode | null>(null);
+  // 备注弹层:关闭时先播退场动画,再卸载
+  const { value: aliasTarget, closing: aliasClosing, open: openAlias, close: closeAlias } = useDelayedClose<FolderNode>();
   // 移除图库是破坏性操作(索引会级联删除),必须二次确认
-  const [removeRootTarget, setRemoveRootTarget] = useState<LibraryRoot | null>(null);
+  const { value: removeRootTarget, closing: removeRootClosing, open: openRemoveRoot, close: closeRemoveRoot } = useDelayedClose<LibraryRoot>();
   const [aliasValue, setAliasValue] = useState('');
 
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const { value: settingsOpen, closing: settingsClosing, open: openSettings, close: closeSettings } = useDelayedClose<true>();
   const [closeToTray, setCloseToTray] = useState(true);
   // 平面模式:关掉实时模糊与进场动画(显卡弱 / 远程桌面时用)
   const [reduceEffects, setReduceEffects] = useState(false);
@@ -822,9 +771,9 @@ export function App() {
     setSelectMode(false);
     closeSelection();
   }, [closeSelection]);
-  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
+  const { value: confirmBatchDelete, closing: confirmBatchDeleteClosing, open: openConfirmBatchDelete, close: closeConfirmBatchDelete } = useDelayedClose<true>();
   /** 「加入/移出分类」弹层:目标图片(单图或整批多选)+ 指派模式的预勾选(取所有图所属分类的交集) */
-  const [catPicker, setCatPicker] = useState<{ ids: number[]; initialChecked?: number[] } | null>(null);
+  const { value: catPicker, closing: catPickerClosing, open: openCatPicker, close: closeCatPicker } = useDelayedClose<{ ids: number[]; initialChecked?: number[] }>();
   const anchorRef = useRef<number | null>(null);
   const handleSelect = useCallback(
     (id: number, mode: 'toggle' | 'range') => {
@@ -878,7 +827,7 @@ export function App() {
 
   const batchDelete = useCallback(async () => {
     const ids = [...selectedIds];
-    setConfirmBatchDelete(false);
+    closeConfirmBatchDelete();
     try {
       const r = await window.api.deleteImages(ids);
       for (const id of ids) removeRow(id);
@@ -941,9 +890,9 @@ export function App() {
   const menuRef = useRef<HTMLDivElement | null>(null);
   // 渲染后测量定位:先隐形渲染在点击处,量出真实宽高再钳位/翻转(菜单项增删不用再改钳位值)
   const menuPos = useAnchoredMenuPos(menu, menuRef);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const { value: confirmDeleteId, closing: confirmDeleteClosing, open: openConfirmDelete, close: closeConfirmDelete } = useDelayedClose<number>();
   // 重命名弹层:目标 id + 输入框内容
-  const [renameTarget, setRenameTarget] = useState<{ id: number; name: string } | null>(null);
+  const { value: renameTarget, closing: renameClosing, open: openRename, close: closeRename } = useDelayedClose<{ id: number; name: string }>();
   const [renameValue, setRenameValue] = useState('');
   const openMenu = useCallback((id: number, x: number, y: number) => {
     // 坐标原样存作锚点;防超出窗口由 useAnchoredMenuPos 按真实尺寸处理
@@ -1007,13 +956,13 @@ export function App() {
         await window.api.deleteImage(id);
         removeRow(id);
         if (selectedId === id) setSelectedId(null);
-        setConfirmDeleteId(null);
+        closeConfirmDelete();
         notify('已移入回收站');
       } catch (e) {
         notify(errMsg(e), true);
       }
     },
-    [notify, removeRow, selectedId]
+    [notify, removeRow, selectedId, closeConfirmDelete]
   );
 
   // 分类增删改 / 图片归属变化后的统一刷新:树与详情面板归属
@@ -1113,10 +1062,10 @@ export function App() {
         // 多选模式:先清空选择(上面那条),再退出模式;优先级高于详情面板
         else if (selectMode) exitSelectMode();
         else if (menu) closeMenu();
-        else if (confirmBatchDelete) setConfirmBatchDelete(false);
-        else if (removeRootTarget) setRemoveRootTarget(null);
-        else if (confirmDeleteId !== null) setConfirmDeleteId(null);
-        else if (settingsOpen) setSettingsOpen(false);
+        else if (confirmBatchDelete) closeConfirmBatchDelete();
+        else if (removeRootTarget) closeRemoveRoot();
+        else if (confirmDeleteId !== null) closeConfirmDelete();
+        else if (settingsOpen) closeSettings();
         else if (selectedId !== null) closeDetail();
         return;
       }
@@ -1139,7 +1088,11 @@ export function App() {
   }, [
     selectedId, prev, next, setQuery, menu, folderMenu, moreMenu,
     settingsOpen, confirmDeleteId, renameTarget, selectedIds, refreshList,
-    selectMode, exitSelectMode,
+    selectMode, exitSelectMode, closeFolderMenu, closeMoreMenu, closeSelection,
+    closeMenu, closeConfirmBatchDelete, closeRemoveRoot, closeConfirmDelete,
+    closeSettings,
+    // closeDetail 在后面才声明,进 deps 会触发 TDZ;它是稳定的 useCallback,缺失无影响
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   ]);
 
   // 滚到底自动加载下一页
@@ -1267,7 +1220,7 @@ export function App() {
           notify(ids.length > 1 ? '这些图片没有共同所属的分类' : '这张图片不属于任何分类', true);
           return;
         }
-        setCatPicker({ ids, initialChecked: common });
+        openCatPicker({ ids, initialChecked: common });
       } catch (e) {
         notify(errMsg(e), true);
       }
@@ -1714,7 +1667,7 @@ export function App() {
             type="button"
             title="设置"
             style={{ ...btn, marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 5 }}
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => openSettings(true)}
           >
             <GearIcon />
             设置
@@ -1934,7 +1887,6 @@ export function App() {
           <DetailSlot closing={detailClosing}>
             <DetailPanel
               target={renderTarget}
-              closing={detailClosing}
               categories={catList}
               catIds={detail.cats.data ?? []}
               onClose={closeDetail}
@@ -2025,7 +1977,7 @@ export function App() {
                 const row = menuRow;
                 closeMenu();
                 setRenameValue((row?.fileName ?? '').replace(/\.png$/i, ''));
-                setRenameTarget({ id: menu.id, name: row?.fileName ?? '' });
+                openRename({ id: menu.id, name: row?.fileName ?? '' });
               }}
             >
               重命名…
@@ -2040,7 +1992,7 @@ export function App() {
                 // 右键的卡在多选集合里 → 整批加入;否则只操作这一张
                 const ids = selectedIds.has(menu.id) && selectedIds.size > 1 ? [...selectedIds] : [menu.id];
                 closeMenu();
-                setCatPicker({ ids });
+                openCatPicker({ ids });
               }}
             >
               加入分类…
@@ -2090,7 +2042,7 @@ export function App() {
             <button type="button" className="cam-menu-item" onClick={() => { closeMenu(); void moveImage(menu.id); }}>
               移动到文件夹…
             </button>
-            <button type="button" className="cam-menu-item danger" onClick={() => { setConfirmDeleteId(menu.id); closeMenu(); }}>
+            <button type="button" className="cam-menu-item danger" onClick={() => { openConfirmDelete(menu.id); closeMenu(); }}>
               删除(移入回收站)
             </button>
           </div>
@@ -2099,10 +2051,11 @@ export function App() {
 
       {renameTarget !== null ? (
         <div
-          className="cam-modal"
-          onClick={(e) => { if (e.target === e.currentTarget) setRenameTarget(null); }}
+          className={`cam-modal${renameClosing ? ' closing' : ''}`}
+          onClick={(e) => { if (e.target === e.currentTarget) closeRename(); }}
         >
-          <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 10, width: 420, padding: '16px 18px' }}>
+          {/* 背景/描边/圆角/投影统一由 .cam-modal > div 的玻璃规则提供,这里只留尺寸 */}
+          <div style={{ width: 420, padding: '16px 18px' }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>重命名图片</div>
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
               会直接改磁盘上的文件名(扩展名保持不变),缩略图与索引一起更新。
@@ -2123,7 +2076,7 @@ export function App() {
                     if (row) patchRow(id, { fileName: row.fileName });
                     if (selectedId === id) detail.detail.reload();
                     notify('已重命名为 ' + (row?.fileName ?? next));
-                    setRenameTarget(null);
+                    closeRename();
                   })
                   .catch((e) => notify(errMsg(e), true));
               }}
@@ -2133,12 +2086,12 @@ export function App() {
                 value={renameValue}
                 onChange={(e) => setRenameValue(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Escape') setRenameTarget(null);
+                  if (e.key === 'Escape') closeRename();
                 }}
                 style={{ ...input, width: '100%', marginBottom: 14 }}
               />
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button type="button" style={btn} onClick={() => setRenameTarget(null)}>
+                <button type="button" style={btn} onClick={() => closeRename()}>
                   取消
                 </button>
                 <button
@@ -2154,14 +2107,14 @@ export function App() {
       ) : null}
 
       {confirmDeleteId !== null ? (
-        <div className="cam-modal" onClick={(e) => { if (e.target === e.currentTarget) setConfirmDeleteId(null); }}>
-          <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 10, width: 380, padding: '16px 18px' }}>
+        <div className={`cam-modal${confirmDeleteClosing ? ' closing' : ''}`} onClick={(e) => { if (e.target === e.currentTarget) closeConfirmDelete(); }}>
+          <div style={{ width: 380, padding: '16px 18px' }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>删除这张图片?</div>
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 14 }}>
               文件会移入系统回收站,可以从回收站恢复;索引记录会立即移除。
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button type="button" style={btn} onClick={() => setConfirmDeleteId(null)}>
+              <button type="button" style={btn} onClick={() => closeConfirmDelete()}>
                 取消
               </button>
               <button
@@ -2189,7 +2142,7 @@ export function App() {
           <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => void batchMove()}>
             移动…
           </button>
-          <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => setCatPicker({ ids: [...selectedIds] })}>
+          <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => openCatPicker({ ids: [...selectedIds] })}>
             加入分类…
           </button>
           <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => void openRemoveCatPicker([...selectedIds])}>
@@ -2198,7 +2151,7 @@ export function App() {
           <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => void batchStar()}>
             {firstSelectedStarred ? '取消收藏' : '收藏'}
           </button>
-          <button type="button" className="cam-sb-btn danger" disabled={!selectedIds.size} onClick={() => setConfirmBatchDelete(true)}>
+          <button type="button" className="cam-sb-btn danger" disabled={!selectedIds.size} onClick={() => openConfirmBatchDelete(true)}>
             删除
           </button>
           <button type="button" className="cam-sb-btn" onClick={() => (selectMode ? exitSelectMode() : closeSelection())}>
@@ -2208,14 +2161,14 @@ export function App() {
       ) : null}
 
       {confirmBatchDelete ? (
-        <div className="cam-modal" onClick={(e) => { if (e.target === e.currentTarget) setConfirmBatchDelete(false); }}>
-          <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 10, width: 400, padding: '16px 18px' }}>
+        <div className={`cam-modal${confirmBatchDeleteClosing ? ' closing' : ''}`} onClick={(e) => { if (e.target === e.currentTarget) closeConfirmBatchDelete(); }}>
+          <div style={{ width: 400, padding: '16px 18px' }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>删除选中的 {selectedIds.size} 张图片?</div>
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 14 }}>
               文件会全部移入系统回收站(可恢复),索引记录立即移除。
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button type="button" style={btn} onClick={() => setConfirmBatchDelete(false)}>取消</button>
+              <button type="button" style={btn} onClick={() => closeConfirmBatchDelete()}>取消</button>
               <button type="button" style={{ ...btn, borderColor: 'var(--bad)', color: 'var(--bad)' }} onClick={() => void batchDelete()}>
                 删除 {selectedIds.size} 张
               </button>
@@ -2225,8 +2178,8 @@ export function App() {
       ) : null}
 
       {removeRootTarget ? (
-        <div className="cam-modal" onClick={(e) => { if (e.target === e.currentTarget) setRemoveRootTarget(null); }}>
-          <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 10, width: 440, padding: '16px 18px' }}>
+        <div className={`cam-modal${removeRootClosing ? ' closing' : ''}`} onClick={(e) => { if (e.target === e.currentTarget) closeRemoveRoot(); }}>
+          <div style={{ width: 440, padding: '16px 18px' }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
               移除图库「{removeRootTarget.label}」?
             </div>
@@ -2237,13 +2190,13 @@ export function App() {
               {removeRootTarget.path}
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button type="button" style={btn} onClick={() => setRemoveRootTarget(null)}>取消</button>
+              <button type="button" style={btn} onClick={() => closeRemoveRoot()}>取消</button>
               <button
                 type="button"
                 style={{ ...btn, borderColor: 'var(--bad)', color: 'var(--bad)' }}
                 onClick={() => {
                   const target = removeRootTarget;
-                  setRemoveRootTarget(null);
+                  closeRemoveRoot();
                   void removeLibraryRoot(target.id, target.label);
                 }}
               >
@@ -2279,7 +2232,7 @@ export function App() {
                 const n = folderMenu.node;
                 closeFolderMenu();
                 setAliasValue(n.alias ?? '');
-                setAliasTarget(n);
+                openAlias(n);
               }}
             >
               重命名(备注)…
@@ -2394,8 +2347,8 @@ export function App() {
 
       {aliasTarget ? (
 
-        <div className="cam-modal" onClick={(e) => { if (e.target === e.currentTarget) setAliasTarget(null); }}>
-          <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 10, width: 420, padding: '16px 18px' }}>
+        <div className={`cam-modal${aliasClosing ? ' closing' : ''}`} onClick={(e) => { if (e.target === e.currentTarget) closeAlias(); }}>
+          <div style={{ width: 420, padding: '16px 18px' }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>给文件夹起个备注</div>
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>
               只改管理器里显示的名字,磁盘上的目录名不动。留空则恢复原名。
@@ -2407,18 +2360,18 @@ export function App() {
               onSubmit={(e) => {
                 e.preventDefault();
                 void applyFolderAlias(aliasTarget.rootId, aliasTarget.relDir, aliasValue);
-                setAliasTarget(null);
+                closeAlias();
               }}
             >
               <input
                 autoFocus
                 value={aliasValue}
                 onChange={(e) => setAliasValue(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Escape') setAliasTarget(null); }}
+                onKeyDown={(e) => { if (e.key === 'Escape') closeAlias(); }}
                 style={{ ...input, width: '100%', marginBottom: 14 }}
               />
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button type="button" style={btn} onClick={() => setAliasTarget(null)}>取消</button>
+                <button type="button" style={btn} onClick={() => closeAlias()}>取消</button>
                 <button type="submit" style={{ ...btn, borderColor: 'var(--accent)', color: 'var(--accent)' }}>确定</button>
               </div>
             </form>
@@ -2427,8 +2380,8 @@ export function App() {
       ) : null}
 
       {settingsOpen ? (
-        <div className="cam-modal" onClick={(e) => { if (e.target === e.currentTarget) setSettingsOpen(false); }}>
-          <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 10, width: 520, maxHeight: '82vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <div className={`cam-modal${settingsClosing ? ' closing' : ''}`} onClick={(e) => { if (e.target === e.currentTarget) closeSettings(); }}>
+          <div style={{ width: 520, maxHeight: '82vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             <h2 style={{ fontSize: 13, margin: 0, padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
               设置
             </h2>
@@ -2591,7 +2544,7 @@ export function App() {
                         <button
                           type="button"
                           style={{ ...btn, padding: '3px 8px', fontSize: 11, color: 'var(--muted)' }}
-                          onClick={() => setRemoveRootTarget(r)}
+                          onClick={() => openRemoveRoot(r)}
                         >
                           移除
                         </button>
@@ -2641,7 +2594,8 @@ export function App() {
           categories={catList}
           imageIds={catPicker.ids}
           initialChecked={catPicker.initialChecked}
-          onClose={() => setCatPicker(null)}
+          closing={catPickerClosing}
+          onClose={() => closeCatPicker()}
           onApplied={() => {
             refreshCategories();
             // 正在浏览某个分类:移出会让图离开当前视图,网格原地刷新
@@ -2653,16 +2607,18 @@ export function App() {
         />
       ) : null}
 
-      {toast ? <div className={`cam-toast${toast.bad ? ' bad' : ''}`}>{toast.msg}</div> : null}
+      {toast ? <div className={`cam-toast${toast.bad ? ' bad' : ''}${toastClosing ? ' closing' : ''}`}>{toast.msg}</div> : null}
     </div>
   );
 }
 
+/* 控件材质统一走玻璃体系(--ctl-* / --radius-md):工具条里有 .cam-toolbar 的 !important 覆写,
+   这里的值实际作用于弹层、设置面板等场景 */
 const input: React.CSSProperties = {
-  background: 'var(--panel)',
-  border: '1px solid var(--border)',
+  background: 'var(--ctl-bg)',
+  border: '1px solid var(--ctl-border)',
   color: 'var(--fg)',
-  borderRadius: 6,
+  borderRadius: 'var(--radius-md)',
   padding: '5px 9px',
   font: 'inherit',
   fontSize: 12,
@@ -2670,10 +2626,10 @@ const input: React.CSSProperties = {
 };
 
 const btn: React.CSSProperties = {
-  background: 'var(--panel)',
-  border: '1px solid var(--border)',
+  background: 'var(--ctl-bg)',
+  border: '1px solid var(--ctl-border)',
   color: 'var(--fg)',
-  borderRadius: 6,
+  borderRadius: 'var(--radius-md)',
   padding: '5px 10px',
   font: 'inherit',
   fontSize: 12,
@@ -2684,10 +2640,10 @@ const menuSelect: React.CSSProperties = {
   display: 'block',
   width: 'calc(100% - 16px)',
   margin: '0 8px 6px',
-  background: 'var(--panel2)',
-  border: '1px solid var(--border)',
+  background: 'var(--ctl-bg)',
+  border: '1px solid var(--ctl-border)',
   color: 'var(--fg)',
-  borderRadius: 6,
+  borderRadius: 'var(--radius-md)',
   padding: '5px 8px',
   font: 'inherit',
   fontSize: 12,

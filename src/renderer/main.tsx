@@ -56,9 +56,10 @@ style.textContent = `
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); }
   #root { height: 100%; }
-  /* 主题切换时的过渡动画(只过渡颜色,不影响布局) */
+  /* 主题切换时的过渡动画(颜色与光影一起过渡,不影响布局;
+     补上 box-shadow 后,玻璃的高光/投影不再"颜色渐变、光影跳变") */
   body, header, aside, main, input, select, button, .cam-card, #cam-scroll, .cam-detail {
-    transition: background-color .25s ease, border-color .25s ease, color .25s ease;
+    transition: background-color .25s ease, border-color .25s ease, color .25s ease, box-shadow .25s ease;
   }
   input[type=search]::-webkit-search-cancel-button { filter: invert(0.6); }
   html[data-theme='light'] input[type=search]::-webkit-search-cancel-button { filter: none; }
@@ -73,7 +74,7 @@ style.textContent = `
   img { -webkit-user-drag: none; }
 
   /* 卡片:悬浮描边 + 右上角收藏按钮(悬浮显示,已收藏常显) */
-  .cam-card { transition: border-color .12s; }
+  .cam-card { transition: border-color var(--dur-1) var(--ease); }
   .cam-card:hover { border-color: var(--accent) !important; }
   /* 收藏星:z-index 必须 > 0 —— 悬浮时图片有 transform(自层叠上下文),
      星星没有层级就会被图片盖住("鼠标一放上去星就不见了"的根因)。
@@ -81,7 +82,7 @@ style.textContent = `
   .cam-star { position: absolute; top: 6px; right: 6px; z-index: 3; background: rgba(0,0,0,.55);
     border: 0; color: #e3b341; border-radius: 6px; padding: 3px 8px; font-size: 15px;
     line-height: 1.4; cursor: pointer; opacity: 0; pointer-events: none;
-    transition: opacity .12s, background .12s, transform .15s var(--ease); }
+    transition: opacity var(--dur-1) var(--ease), background var(--dur-1) var(--ease), transform .15s var(--ease); }
   .cam-card:hover .cam-star, .cam-star.on { opacity: 1; pointer-events: auto; }
   .cam-star.on { color: #ffd166; text-shadow: 0 0 8px rgba(255,180,0,.6); }
   .cam-star:hover { background: rgba(0,0,0,.8); }
@@ -115,7 +116,7 @@ style.textContent = `
   html[data-lite='1'] .cam-card.open { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 1px var(--accent); }
   /* 瀑布流卡片顶部的磨砂动作条:悬浮才出现,只起背景作用(按钮各自定位) */
   .cam-card-bar { position: absolute; top: 0; left: 0; right: 0; height: 36px; z-index: 2;
-    pointer-events: none; opacity: 0; transition: opacity .14s ease;
+    pointer-events: none; opacity: 0; transition: opacity var(--dur-1) var(--ease);
     background: linear-gradient(rgba(8,10,16,.42), rgba(8,10,16,0)); }
   .cam-card:hover .cam-card-bar { opacity: 1;
     backdrop-filter: blur(12px) saturate(1.5); -webkit-backdrop-filter: blur(12px) saturate(1.5); }
@@ -129,7 +130,7 @@ style.textContent = `
   .cam-copy-btn { position: absolute; top: 6px; right: 6px; z-index: 2; font: inherit;
     font-size: 10.5px; padding: 2px 8px; border-radius: 6px; cursor: pointer;
     border: 1px solid var(--border); background: var(--panel2); color: var(--muted);
-    opacity: .6; transition: opacity .12s ease, color .12s ease, border-color .12s ease; }
+    opacity: .6; transition: opacity var(--dur-1) var(--ease), color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease); }
   .cam-copy-btn:hover { opacity: 1; color: var(--accent); border-color: var(--accent); }
   .cam-copy-btn.ok { opacity: 1; color: var(--ok); border-color: var(--ok); }
   /* 详情面板的分类小胶囊:磨砂小胶囊,✕ 平时安静、悬浮整条时显色 */
@@ -181,7 +182,7 @@ style.textContent = `
     color: #fff; font-size: 12px; line-height: 1; cursor: pointer; opacity: .35;
     pointer-events: auto;
     display: flex; align-items: center; justify-content: center;
-    transition: opacity .15s ease, background .15s ease, transform .12s ease; }
+    transition: opacity var(--dur-1) var(--ease), background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease); }
   .cam-pick:active { transform: scale(1.15); }
   .cam-card:hover .cam-pick { opacity: 1; }
   .cam-pick.on { opacity: 1; background: var(--accent); border-color: var(--accent); color: #04121f; font-weight: 700; }
@@ -201,7 +202,7 @@ style.textContent = `
   .cam-menu-item { display: flex; width: 100%; text-align: left; background: none; border: 0;
     color: var(--fg); padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer;
     border-radius: 5px; align-items: center; gap: 8px;
-    transition: background-color .12s ease, color .12s ease, transform .12s ease; }
+    transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease); }
   .cam-menu-item:hover { background: var(--accent-soft); color: var(--accent); }
   .cam-menu-item:active { transform: scale(.97); }
   .cam-menu-item.danger { color: var(--bad); }
@@ -213,10 +214,10 @@ style.textContent = `
     cursor: pointer; padding: 0; overflow: hidden; font: inherit; }
   .cam-switch-thumb { position: absolute; top: 2px; bottom: 2px; left: 2px; width: calc(50% - 3px);
     border-radius: 13px; background: var(--accent-soft); border: 1px solid var(--accent);
-    transition: transform .22s cubic-bezier(.4,0,.2,1); transform: translateX(0); }
+    transition: transform var(--dur-2) var(--ease); transform: translateX(0); }
   .cam-switch.right .cam-switch-thumb { transform: translateX(calc(100% + 2px)); }
   .cam-switch-opt { flex: 1; z-index: 1; display: flex; align-items: center; justify-content: center;
-    font-size: 12px; color: var(--muted); transition: color .22s ease; user-select: none; }
+    font-size: 12px; color: var(--muted); transition: color var(--dur-2) var(--ease); user-select: none; }
   .cam-switch .cam-switch-opt.on { color: var(--accent); font-weight: 600; }
   /* ================= D1 视觉:苹果风磨砂玻璃(材料 / 层次 / 动效) =================
      参考 macOS / iOS 的玻璃材质:极低对比的浅色半透明 + 强背景模糊 + 大圆角 +
@@ -401,16 +402,12 @@ style.textContent = `
     outline: none;
   }
   /* 分类选择弹层的行:悬浮有底色反馈 */
-  .cam-catpick-row { transition: background-color .12s ease; }
+  .cam-catpick-row { transition: background-color var(--dur-1) var(--ease); }
   .cam-catpick-row:hover { background: var(--accent-soft); }
   .cam-menu-item.active { color: var(--accent); background: var(--accent-soft); }
 
   /* ---- 统一的"有始有终"动画 ----
      所有浮层/弹层都成对提供进场与退场关键帧,退场由渲染层延迟卸载保证播完。 */
-  @keyframes cam-menu-in {
-    from { opacity: 0; transform: translateY(-6px) scale(.98); }
-    to   { opacity: 1; transform: translateY(0) scale(1); }
-  }
   @keyframes cam-menu-out {
     from { opacity: 1; transform: translateY(0) scale(1); }
     to   { opacity: 0; transform: translateY(-6px) scale(.98); }
@@ -429,17 +426,11 @@ style.textContent = `
   .cam-modal.closing { animation: cam-fade-out var(--dur-1) var(--ease) forwards; }
   .cam-modal.closing > div { animation: cam-pop-out var(--dur-1) var(--ease) forwards; }
   .cam-toast.closing { animation: cam-toast-out var(--dur-1) var(--ease) forwards; }
-  .cam-selectbar.closing { animation: cam-pop-out var(--dur-1) var(--ease) forwards; }
-  /* 详情面板:关闭时向右滑出(与槽位宽度回收同节奏),而不是"啪"地消失 */
-  .cam-detail.closing { animation: cam-slide-out var(--dur-3) var(--ease) forwards; }
-  @keyframes cam-slide-out {
-    from { opacity: 1; transform: translateX(0); }
-    to   { opacity: 0; transform: translateX(22px); }
-  }
-  .cam-petw { animation: cam-pop var(--dur-2) var(--ease); }
-  .cam-petw.closing { animation: cam-pop-out var(--dur-1) var(--ease) forwards; }
-  .cam-petpanel { animation: cam-slide var(--dur-2) var(--ease); }
-  .cam-petpanel.closing { animation: cam-pop-out var(--dur-1) var(--ease) forwards; }
+  /* selectbar 与 toast 一样是 translateX(-50%) 居中,退场要用保留 -50% 的关键帧,
+     否则动画期间 transform 被覆盖、整条会向右跳半条宽 */
+  .cam-selectbar.closing { animation: cam-toast-out var(--dur-1) var(--ease) forwards; }
+  /* 详情面板的退场只有一套:槽位宽度回收(App.tsx 的 DetailSlot)。
+     以前这里还叠着一层滑出位移动画,两套同时播会让面板"边滑边被裁",已去掉。 */
   html[data-lite='1'] .cam-menu.closing,
   html[data-lite='1'] .cam-menu-mask.closing,
   html[data-lite='1'] .cam-modal.closing,
@@ -523,7 +514,7 @@ style.textContent = `
     border: 0; background: none; color: var(--muted); cursor: pointer; border-radius: 4px;
     width: 16px; height: 16px; padding: 0; display: flex; align-items: center; justify-content: center;
     font-size: 13px; line-height: 1; font-family: inherit; flex-shrink: 0;
-    transition: background-color .12s ease, color .12s ease, opacity .12s ease;
+    transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease), opacity var(--dur-1) var(--ease);
   }
   .cam-tab-x:hover { background: var(--bad-bg); color: var(--bad); }
   /* 平时低调、悬停或激活时更明显(不做"只有悬停才出现"—— 那会让标签窄的时候找不到关闭键) */
@@ -570,9 +561,20 @@ style.textContent = `
     transition: width var(--dur-3) var(--ease);
   }
   /* 详情面板的本体**不做进场动画**(v0.6:槽位宽度已经从 0 抹开,再叠一层
-     cam-slide 的位移会让面板在 400px 宽度里逐帧重排,预览大图尤其贵 ——
+     位移动画会让面板在 520px 宽度里逐帧重排,预览大图尤其贵 ——
      用户看到的就是"打开卡片时动画抽搐"。见 v0.6-改进说明 第 1 条。 */
   .cam-detail { margin: 0; }
+  /* 详情面板的 sticky 顶栏:与 cam-header 同族的磨砂,滚动时参数内容从玻璃下穿过去 */
+  .cam-detail-head {
+    position: sticky; top: 0; z-index: 2;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    padding: 9px 13px;
+    background: var(--glass-2);
+    backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+    border-bottom: 1px solid var(--glass-border);
+    box-shadow: var(--edge);
+  }
   /* 卡片:数量多,不做 backdrop-filter(几千张滚动会卡),用半透明 + 柔和投影撑起层次 */
   .cam-card {
     background: var(--card) !important;
@@ -609,7 +611,6 @@ style.textContent = `
   html[data-lite='1'] .cam-card img { opacity: 1; transition: none; }
   /* 图片只做极轻微推近;文字完全不缩放,保持锐利 */
   .cam-card:hover img.loaded { transform: scale(1.015); }
-  @keyframes cam-slide { from { opacity: 0; transform: translateX(16px); } }
   /* 弹层 / 菜单 / 提示:同样用玻璃,淡入 + 轻微上浮 */
   .cam-modal { animation: cam-fade var(--dur-2) var(--ease); }
   .cam-modal > div {
@@ -683,6 +684,7 @@ style.textContent = `
   html[data-lite='1'] .cam-side,
   html[data-lite='1'] .cam-gridwrap,
   html[data-lite='1'] .cam-detail,
+  html[data-lite='1'] .cam-detail-head,
   html[data-lite='1'] .cam-menu,
   html[data-lite='1'] .cam-toast,
   html[data-lite='1'] .cam-selectbar,
@@ -693,6 +695,8 @@ style.textContent = `
   html[data-lite='1'] .cam-side,
   html[data-lite='1'] .cam-gridwrap,
   html[data-lite='1'] .cam-detail { background: var(--panel) !important; }
+  /* 平面模式:sticky 顶栏退回实色(不透过下面滚动的内容) */
+  html[data-lite='1'] .cam-detail-head { background: var(--panel); }
   /* 平面模式:槽位宽度不做过渡,直接到位 */
   html[data-lite='1'] .cam-detail-slot { transition: none; }
   html[data-lite='1'] .cam-card { animation: none !important; }

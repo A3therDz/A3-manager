@@ -23,12 +23,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CategoryNode, DetailTarget, ImageDetail, PromptBlock } from '@shared/types';
 import { errMsg, fileUrl, thumbUrl } from '../api';
+import { useDelayedClose } from '../useDelayedClose';
 import { CategoryPicker } from './CategoryPicker';
 
 interface Props {
   target: DetailTarget;
-  /** 正在播退场动画:给容器挂 .closing,内容保持不动 */
-  closing?: boolean;
   categories: CategoryNode[];
   /** 该图所属分类 id(仅索引图有效) */
   catIds: number[];
@@ -170,7 +169,6 @@ function orderPrompts(prompts: PromptBlock[]): PromptBlock[] {
 
 export function DetailPanel({
   target,
-  closing = false,
   categories,
   catIds,
   onClose,
@@ -188,16 +186,16 @@ export function DetailPanel({
   const indexed: ImageDetail | null = target.kind === 'indexed' ? target.detail : null;
   const dropped = target.kind === 'dropped' ? target.info : null;
 
-  // 「分类…」弹层:勾选只是暂存,点「确定」才落库(见 CategoryPicker)
-  const [catModalOpen, setCatModalOpen] = useState(false);
+  // 「分类…」弹层:勾选只是暂存,点「确定」才落库(见 CategoryPicker);关闭先播退场再卸载
+  const { value: catModalOpen, closing: catModalClosing, open: openCatModal, close: closeCatModal } = useDelayedClose<true>();
 
   // 预览图原图加载失败时退回缩略图(换图时重置)
   const [previewFallback, setPreviewFallback] = useState(false);
 
   // 换图 / 关闭后收起弹层,免得残留上一张的勾选状态
   useEffect(() => {
-    setCatModalOpen(false);
-  }, [target.kind === 'indexed' ? target.detail?.id : target.info.path]);
+    closeCatModal();
+  }, [target.kind === 'indexed' ? target.detail?.id : target.info.path, closeCatModal]);
 
   // 换图后重置预览回退状态(新图先尝试原图)
   useEffect(() => {
@@ -211,8 +209,6 @@ export function DetailPanel({
   const allPrompts = orderPrompts(m?.prompts ?? []);
   const names = catNameMap(categories);
   const loras = m?.loras ?? [];
-
-  const openCatModal = () => setCatModalOpen(true);
 
   const fileName = indexed ? indexed.fileName : dropped ? dropped.fileName : '';
   const fileSize = indexed ? indexed.fileSize : dropped ? dropped.fileSize : 0;
@@ -235,7 +231,7 @@ export function DetailPanel({
 
   return (
     <div
-      className={`cam-detail${closing ? ' closing' : ''}`}
+      className="cam-detail"
       style={{
         width: 520,
         flexShrink: 0,
@@ -244,20 +240,8 @@ export function DetailPanel({
         height: '100%',
       }}
     >
-      <div
-        style={{
-          position: 'sticky',
-          top: 0,
-          background: 'var(--panel)',
-          borderBottom: '1px solid var(--border)',
-          padding: '9px 13px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 8,
-          zIndex: 2,
-        }}
-      >
+      {/* sticky 顶栏:磨砂材质在 .cam-detail-head(main.tsx),与 cam-header 同族 */}
+      <div className="cam-detail-head">
         <span
           title={fileName}
           className="cam-detail-title"
@@ -361,7 +345,7 @@ export function DetailPanel({
         {indexed ? (
           <Section title="分类">
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <button type="button" style={primaryBtn} onClick={openCatModal}>
+              <button type="button" style={primaryBtn} onClick={() => openCatModal(true)}>
                 分类…
               </button>
               {catIds.length === 0 ? (
@@ -527,7 +511,8 @@ export function DetailPanel({
           categories={categories}
           imageIds={[indexed.id]}
           initialChecked={catIds}
-          onClose={() => setCatModalOpen(false)}
+          closing={catModalClosing}
+          onClose={() => closeCatModal()}
           onApplied={onChanged}
           notify={notify}
         />
