@@ -493,6 +493,20 @@ function PetApp() {
     };
   }, [open, closing, menu, requestClose, closeMenu]);
 
+  // ---- 点击桌面(窗口失焦)时关菜单
+  //
+  // 关菜单不能只靠窗口内的 pointerdown:点到桌面上时事件根本到不了渲染层。
+  // 不收的话,收起态为画菜单撑大的窗口会一直停在"图标 ∪ 菜单"的尺寸,
+  // 这块透明矩形在非穿透模式下持续拦截桌面点击,穿透模式下菜单永远挂着。
+  React.useEffect(() => {
+    const onBlur = () => {
+      // 拖动中不关:拖动链由 pointer capture 保证,失焦不应打断;菜单此时也不会开着
+      if (menu && !dragRef.current) closeMenu();
+    };
+    window.addEventListener('blur', onBlur);
+    return () => window.removeEventListener('blur', onBlur);
+  }, [menu, closeMenu]);
+
   // ---- 点击穿透:悬停图标/面板时临时恢复交互
   //
   // 原理:穿透开启后主进程 setIgnoreMouseEvents(true, { forward: true }),

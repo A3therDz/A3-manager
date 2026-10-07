@@ -2512,6 +2512,7 @@ export function App() {
                   <div style={{ fontSize: 11, color: 'var(--muted)' }}>
                     开启后小窗不拦截鼠标,桌面操作直接落到下面的窗口;悬停到小图标/面板上会临时恢复交互。
                     右键小图标有菜单:打开主界面 / 展开收起 / 隐藏浮窗
+                    (穿透开启后,先悬停小图标恢复交互,再右键开菜单)
                   </div>
                 </div>
                 <SlideSwitch
