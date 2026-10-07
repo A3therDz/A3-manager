@@ -124,6 +124,7 @@ const api = {
   },
   movePetWindow: (bounds) => call('movePetWindow', bounds),
   closePetWindow: () => call('closePetWindow'),
+  setPetIgnoreMouse: (ignore) => call('setPetIgnoreMouse', ignore),
 };
 
 contextBridge.exposeInMainWorld('api', api);

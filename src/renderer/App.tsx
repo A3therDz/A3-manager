@@ -475,6 +475,8 @@ export function App() {
   const [petEnabled, setPetEnabledState] = useState(false);
   /** 小窗是否图片优先(列表左右交替、详情整屏看图、不显示参数文字) */
   const [petImageFirst, setPetImageFirst] = useState(true);
+  /** 小窗点击穿透:不拦鼠标,悬停小图标/面板时临时恢复交互 */
+  const [petClickThrough, setPetClickThrough] = useState(false);
   /** 设置是否已经从主进程读回来(决定"恢复上次浏览位置"能不能执行) */
   const [settingsReady, setSettingsReady] = useState(false);
   /** 上次浏览的文件夹:主窗口启动时恢复,之后由切换动作维护 */
@@ -579,6 +581,7 @@ export function App() {
         setCloseToTray(s.closeToTray);
         setPetEnabledState(s.petEnabled === true);
         setPetImageFirst(s.petImageFirst !== false);
+        setPetClickThrough(s.petClickThrough === true);
         lastRelDirRef.current = s.lastBrowseRelDir ?? null;
         setReduceEffects(s.reduceEffects === true);
         if (s.theme === 'light' || s.theme === 'dark') setTheme(s.theme);
@@ -697,6 +700,17 @@ export function App() {
       window.api
         .setSettings({ petImageFirst: v })
         .then(() => notify(v ? '小窗以图片为主' : '小窗显示文字'))
+        .catch((e) => notify(errMsg(e), true));
+    },
+    [notify]
+  );
+
+  const applyPetClickThrough = useCallback(
+    (v: boolean) => {
+      setPetClickThrough(v);
+      window.api
+        .setSettings({ petClickThrough: v })
+        .then(() => notify(v ? '点击穿透已开启(悬停小图标可临时恢复交互)' : '点击穿透已关闭'))
         .catch((e) => notify(errMsg(e), true));
     },
     [notify]
@@ -2489,6 +2503,22 @@ export function App() {
                   rightLabel="图片为主"
                   value={petImageFirst}
                   onChange={applyPetImageFirst}
+                />
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <div>
+                  <div style={{ fontSize: 12 }}>小窗点击穿透</div>
+                  <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+                    开启后小窗不拦截鼠标,桌面操作直接落到下面的窗口;悬停到小图标/面板上会临时恢复交互。
+                    右键小图标有菜单:打开主界面 / 展开收起 / 隐藏浮窗
+                  </div>
+                </div>
+                <SlideSwitch
+                  leftLabel="关闭"
+                  rightLabel="开启"
+                  value={petClickThrough}
+                  onChange={applyPetClickThrough}
                 />
               </div>
 

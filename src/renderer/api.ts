@@ -108,6 +108,7 @@ function createHttpApi(): ApiSurface {
         position: null,
         reduceEffects: false,
         imageFirst: true,
+        clickThrough: false,
         lastRelDir: null,
       }),
     setPetPosition: () => Promise.resolve(),
@@ -116,6 +117,7 @@ function createHttpApi(): ApiSurface {
     onPetStateChanged: () => () => {},
     movePetWindow: () => Promise.resolve(),
     closePetWindow: () => Promise.resolve(),
+    setPetIgnoreMouse: () => Promise.resolve(),
     openExternal: (id) => {
       window.open(`/api/file/${id}`, '_blank');
       return Promise.resolve();

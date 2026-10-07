@@ -3,8 +3,9 @@
  *
  * 设计要点:
  *  - 窗口是**透明置顶**的,布局只有两种:图标态(正方形小窗)与展开态(图标 + 面板)。
- *  - 展开/收起先把窗口 setBounds 到位、再渲染对应布局(flushSync),
- *    反过来做会让图标/面板短暂画出窗口外 —— 用户看到的就是"点了之后消失一段时间"。
+ *  - 展开先把窗口 setBounds 到位、再渲染对应布局(flushSync),反过来做会让图标/面板
+ *    短暂画出窗口外;收起则相反 —— 先让面板原地播退场动画,播完才缩窗,
+ *    否则动画在提交前就被窗口边界裁掉了。
  *  - 面板默认是**全部图片的卡片流**;文件夹用树形结构,只显示名字,点名字进对应文件夹。
  *  - 拖动一律在图标态进行:展开态下按住图标会先收起再拖,
  *    否则拖动时窗口缩成图标大小而面板还按展开画,两个一起"消失"。
@@ -32,6 +33,7 @@ const api = window.api as unknown as {
     position: { x: number; y: number } | null;
     reduceEffects: boolean;
     imageFirst: boolean;
+    clickThrough: boolean;
   }>;
   setPetPosition(p: { x: number; y: number }): Promise<void>;
   setPetLayout(p: { iconSize?: number; panelSize?: { width: number; height: number } }): Promise<void>;
@@ -39,6 +41,7 @@ const api = window.api as unknown as {
   onPetStateChanged(cb: () => void): () => void;
   movePetWindow(b: { x: number; y: number; width: number; height: number }): Promise<void>;
   closePetWindow(): Promise<void>;
+  setPetIgnoreMouse(ignore: boolean): Promise<void>;
   getFolderTree(rootId?: number): Promise<FolderNode[]>;
   queryImages(q: Record<string, unknown>): Promise<ImageQueryResult>;
   getImagesByIds(ids: number[]): Promise<ImageRecord[]>;
@@ -55,14 +58,29 @@ const api = window.api as unknown as {
  * 布局规则:面板在上、图标在下,中间留 GAP;整体夹进屏幕可视区域。
  */
 const GAP = 10;
+/** 收起退场动画时长:与 pet.css 的 pet-panel-out 保持一致 */
+const CLOSE_MS = 170;
+/** 图标右键菜单的估计尺寸(撑大窗口与夹紧时用) */
+const MENU_W = 168;
+const MENU_H = 118;
+
+/**
+ * 窗口当前所在屏的可用区域(DIP)。
+ * availLeft/availTop 在 TS 的 DOM 类型里还没有(Chrome/Edge 早就支持),手动补类型。
+ * 多屏注意:副屏在左侧/上方时原点是负数,不能写死 (0,0)。
+ */
+function currentWorkArea() {
+  const s = window.screen as Screen & { availLeft?: number; availTop?: number };
+  return {
+    x: s.availLeft ?? 0,
+    y: s.availTop ?? 0,
+    width: s.availWidth,
+    height: s.availHeight,
+  };
+}
 
 function layout(open: boolean, iconScreen: { x: number; y: number }, iconSize: number, panel: { width: number; height: number }) {
-  const wa = {
-    x: 0,
-    y: 0,
-    width: window.screen.availWidth,
-    height: window.screen.availHeight,
-  };
+  const wa = currentWorkArea();
   const icon = { x: iconScreen.x, y: iconScreen.y, width: iconSize, height: iconSize };
 
   if (!open) {
@@ -123,6 +141,14 @@ function PetApp() {
 
   const iconRef = React.useRef<HTMLButtonElement | null>(null);
 
+  /** 收起动画播放中:面板原地播退场动画,窗口还保持展开尺寸,播完才缩窗 */
+  const [closing, setClosing] = React.useState(false);
+  const closeTimerRef = React.useRef(0);
+  /** 图标右键菜单(自绘,窗口内坐标) */
+  const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
+  /** 收起态开菜单时把窗口撑大过:记下撑大前的图标矩形,关菜单时缩回去 */
+  const menuGrowRef = React.useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+
   // ---- 初始状态
   React.useEffect(() => {
     let alive = true;
@@ -145,6 +171,19 @@ function PetApp() {
     };
   }, []);
 
+  // 主题/平面模式挂到 <html> 上:pet.css 的变量按 html[data-theme]/[data-lite] 取值
+  React.useEffect(() => {
+    if (!state) return;
+    const root = document.documentElement;
+    root.dataset.theme = state.theme;
+    root.style.colorScheme = state.theme;
+    if (state.reduceEffects) root.dataset.lite = '1';
+    else delete root.dataset.lite;
+  }, [state]);
+
+  // 卸载时清掉收起动画的定时器
+  React.useEffect(() => () => window.clearTimeout(closeTimerRef.current), []);
+
   const iconSize = Math.max(40, Math.min(160, state?.iconSize || 64));
   const panelSize = state?.panelSize || { width: 430, height: 620 };
   const iconScreen = iconPos || { x: window.screenX, y: window.screenY };
@@ -166,32 +205,80 @@ function PetApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applyBounds]);
 
+  const reduceMotion =
+    (state?.reduceEffects === true) ||
+    (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
   /**
-   * 展开 / 收起。
+   * 收起面板。
    *
-   * 顺序很关键:**先**把窗口 setBounds 到目标形态,**再**同步渲染(flushSync)。
-   * 反过来(先渲染再挪窗口)时,图标/面板的新位置还在旧窗口矩形外面,
-   * IPC 往返期间屏幕上什么都看不到 —— 就是"点一下图标消失一段时间"的来源。
+   * 为什么不是"先 setBounds 缩窗再 setOpen(false)":那样面板在 React 提交前就被
+   * 窗口边界裁掉了,退场动画永远画不出来。现在的顺序是:
+   *   1. 面板原地播 ~170ms 退场动画(closing 类),窗口**保持展开尺寸**;
+   *   2. 动画播完才 movePetWindow 缩回图标大小、再提交关闭状态。
+   * 平面模式 / 系统减弱动效时跳过动画直接缩窗。
    *
    * 锚点用"当前渲染出来的图标位置"而不是 iconPos:图标贴着屏幕底边时,
    * 展开布局会被夹紧,图标的真实位置与 iconPos 相差几十像素;
    * 不校正的话,收起时图标会跳一下、拖动锚点也会偏。
    */
+  const requestClose = React.useCallback(() => {
+    if (!open || closing) return;
+    const finish = () => {
+      closeTimerRef.current = 0;
+      const cur = layout(true, iconScreen, iconSize, panelSize);
+      const curIcon = { x: cur.win.x + cur.iconLocal.x, y: cur.win.y + cur.iconLocal.y };
+      void api.movePetWindow({ x: curIcon.x, y: curIcon.y, width: iconSize, height: iconSize });
+      flushSync(() => {
+        setIconPos(curIcon);
+        setClosing(false);
+        setOpen(false);
+      });
+      // 夹紧修正后的图标位置也落盘,下次启动/拖动锚点都以它为准
+      void api.setPetPosition(curIcon);
+    };
+    if (reduceMotion) {
+      finish();
+      return;
+    }
+    flushSync(() => setClosing(true));
+    closeTimerRef.current = window.setTimeout(finish, CLOSE_MS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, closing, reduceMotion, iconScreen.x, iconScreen.y, iconSize, panelSize.width, panelSize.height]);
+
+  /**
+   * 展开 / 收起。
+   *
+   * 展开的顺序很关键:**先**把窗口 setBounds 到目标形态,**再**同步渲染(flushSync)。
+   * 反过来(先渲染再挪窗口)时,图标/面板的新位置还在旧窗口矩形外面,
+   * IPC 往返期间屏幕上什么都看不到 —— 就是"点一下图标消失一段时间"的来源。
+   * 收起走 requestClose(先播退场动画再缩窗,原因见上)。
+   */
   const toggleOpen = React.useCallback(async () => {
-    const next = !open;
-    const cur = layout(open, iconScreen, iconSize, panelSize);
+    // 收起动画播到一半再点图标 = 反悔:取消定时器,面板留在展开态
+    if (closing) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = 0;
+      flushSync(() => setClosing(false));
+      return;
+    }
+    if (open) {
+      requestClose();
+      return;
+    }
+    const cur = layout(false, iconScreen, iconSize, panelSize);
     const curIcon = { x: cur.win.x + cur.iconLocal.x, y: cur.win.y + cur.iconLocal.y };
-    const L = layout(next, curIcon, iconSize, panelSize);
+    const L = layout(true, curIcon, iconSize, panelSize);
     const nextIcon = { x: L.win.x + L.iconLocal.x, y: L.win.y + L.iconLocal.y };
     await api.movePetWindow(L.win);
     flushSync(() => {
       setIconPos(nextIcon);
-      setOpen(next);
+      setOpen(true);
     });
     // 夹紧修正后的图标位置也落盘,下次启动/拖动锚点都以它为准
     void api.setPetPosition(nextIcon);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, iconScreen.x, iconScreen.y, iconSize, panelSize.width, panelSize.height]);
+  }, [open, closing, requestClose, iconScreen.x, iconScreen.y, iconSize, panelSize.width, panelSize.height]);
 
   /**
    * 拖动图标换位置。
@@ -246,6 +333,12 @@ function PetApp() {
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
       e.preventDefault();
+      // 收起动画播到一半就按住图标 = 想拖走:取消收起,直接按图标态处理
+      if (closeTimerRef.current) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = 0;
+      }
+      if (closing) setClosing(false);
       const el = e.currentTarget;
       // 关键:把这条拖动链的指针事件全部捕获到图标上,
       // 光标飞出窗口也能持续收到移动/抬起
@@ -316,8 +409,137 @@ function PetApp() {
       el.addEventListener('pointercancel', onUp);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [open, pumpDragMove, iconSize, iconScreen.x, iconScreen.y]
+    [open, closing, pumpDragMove, iconSize, iconScreen.x, iconScreen.y]
   );
+
+  // ---- 图标右键菜单(自绘;系统的 contextmenu 在透明无边框小窗上太突兀)
+
+  /** 关菜单;收起态开菜单时窗口被撑大过,顺手缩回图标大小 */
+  const closeMenu = React.useCallback(() => {
+    const grow = menuGrowRef.current;
+    menuGrowRef.current = null;
+    flushSync(() => setMenu(null));
+    if (grow) void api.movePetWindow(grow);
+  }, []);
+
+  /**
+   * 图标右键。
+   * 收起态窗口只有图标大,装不下菜单:先把窗口撑到能容纳菜单
+   * (优先图标上方,不够翻下方),开完菜单、关掉时再缩回去 ——
+   * 与展开/收起同一个顺序:先 setBounds 再 flushSync 渲染,避免菜单画出窗口外。
+   */
+  const onIconContextMenu = React.useCallback(
+    async (e: React.MouseEvent) => {
+      e.preventDefault();
+      if (menu) {
+        closeMenu();
+        return;
+      }
+      if (open || closing) {
+        // 展开态窗口足够大:就地开,夹进窗口内
+        setMenu({
+          x: Math.max(6, Math.min(e.clientX, window.innerWidth - MENU_W - 6)),
+          y: Math.max(6, Math.min(e.clientY, window.innerHeight - MENU_H - 6)),
+        });
+        return;
+      }
+      const wa = currentWorkArea();
+      const icon = { x: iconScreen.x, y: iconScreen.y, w: iconSize, h: iconSize };
+      const mx = Math.min(Math.max(e.screenX - MENU_W / 2, wa.x + 4), wa.x + wa.width - MENU_W - 4);
+      let my = icon.y - MENU_H - 6;
+      if (my < wa.y + 4) my = icon.y + icon.h + 6; // 上方放不下就翻到下方
+      my = Math.min(my, wa.y + wa.height - MENU_H - 4);
+      const winX = Math.min(icon.x, mx);
+      const winY = Math.min(icon.y, my);
+      const bounds = {
+        x: winX,
+        y: winY,
+        width: Math.max(icon.x + icon.w, mx + MENU_W) - winX,
+        height: Math.max(icon.y + icon.h, my + MENU_H) - winY,
+      };
+      menuGrowRef.current = { x: icon.x, y: icon.y, width: icon.w, height: icon.h };
+      await api.movePetWindow(bounds);
+      flushSync(() => setMenu({ x: mx - winX, y: my - winY }));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [menu, open, closing, closeMenu, iconScreen.x, iconScreen.y, iconSize]
+  );
+
+  // ---- Esc 与误触收起 / 关菜单(document 级,capture 阶段先处理)
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (menu) {
+        closeMenu();
+        return;
+      }
+      if (open) requestClose();
+    };
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null;
+      // 菜单开着:点菜单外任何位置 = 关菜单
+      if (menu) {
+        if (!t?.closest('.pet-menu')) closeMenu();
+        return;
+      }
+      // 面板开着:点窗口内、面板与图标之外的透明区 = 收起(图标按下要拖动,不收)
+      if (open && !closing && t && !t.closest('.pet-panel') && !t.closest('.pet-icon')) requestClose();
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onDown, true);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onDown, true);
+    };
+  }, [open, closing, menu, requestClose, closeMenu]);
+
+  // ---- 点击穿透:悬停图标/面板时临时恢复交互
+  //
+  // 原理:穿透开启后主进程 setIgnoreMouseEvents(true, { forward: true }),
+  // 鼠标事件穿透到下面的窗口,但 mousemove 会以 forward 形式转发给本窗口。
+  // 渲染层据此判断光标是否进入图标/面板区域:进入 → setPetIgnoreMouse(false)
+  // 把交互要回来;离开(区域外扩 6px 滞回,或光标离开窗口)→ setPetIgnoreMouse(true)。
+  React.useEffect(() => {
+    if (!state?.clickThrough) return;
+    /** 当前是否处于"忽略鼠标"(穿透)状态:窗口的真实状态由主进程持有,这里跟一份 */
+    let ignoring = true;
+    const PAD = 6; // 滞回:恢复交互后判定区外扩,防边缘来回抖
+
+    const hit = (clientX: number, clientY: number, pad: number) => {
+      const rects: DOMRect[] = [];
+      if (iconRef.current) rects.push(iconRef.current.getBoundingClientRect());
+      for (const el of document.querySelectorAll('.pet-panel, .pet-menu')) {
+        rects.push(el.getBoundingClientRect());
+      }
+      return rects.some(
+        (r) => clientX >= r.left - pad && clientX <= r.right + pad && clientY >= r.top - pad && clientY <= r.bottom + pad
+      );
+    };
+    const onMove = (e: MouseEvent) => {
+      if (dragRef.current) return; // 拖动链由 pointer capture 保证,别中途切穿透
+      if (ignoring) {
+        if (hit(e.clientX, e.clientY, 0)) {
+          ignoring = false;
+          void api.setPetIgnoreMouse(false);
+        }
+      } else if (!hit(e.clientX, e.clientY, PAD)) {
+        ignoring = true;
+        void api.setPetIgnoreMouse(true);
+      }
+    };
+    const onLeave = () => {
+      if (dragRef.current || ignoring) return;
+      ignoring = true;
+      void api.setPetIgnoreMouse(true);
+    };
+    window.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseleave', onLeave);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseleave', onLeave);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state?.clickThrough]);
 
 
 
@@ -503,6 +725,7 @@ function PetApp() {
         className="pet-icon"
         style={{ left: iconLocal.x, top: iconLocal.y, width: iconSize, height: iconSize }}
         onPointerDown={startDrag}
+        onContextMenu={(e) => void onIconContextMenu(e)}
         onClick={() => {
           if (justDraggedRef.current) return;
           void toggleOpen();
@@ -513,8 +736,7 @@ function PetApp() {
 
       {open && panelLocal ? (
         <div
-          className="pet-panel"
-          data-theme={state.theme}
+          className={'pet-panel' + (closing ? ' closing' : '')}
           style={{ left: panelLocal.x, top: panelLocal.y, width: panelSize.width, height: panelSize.height }}
         >
           <div className="pet-head">
@@ -793,6 +1015,37 @@ function PetApp() {
               <div className="pet-empty">这里还没有内容</div>
             ) : null}
           </div>
+        </div>
+      ) : null}
+
+      {menu ? (
+        <div className="pet-menu" style={{ left: menu.x, top: menu.y }}>
+          <button
+            type="button"
+            className="pet-menu-item"
+            onClick={() => {
+              closeMenu();
+              void api.focusMainWindow();
+            }}
+          >
+            打开主界面
+          </button>
+          <button
+            type="button"
+            className="pet-menu-item"
+            onClick={() => {
+              // 收起态开菜单时把窗口撑大过:展开交给 toggleOpen 一次排好,
+              // 不走 closeMenu 的"缩回图标大小",少一次窗口跳动
+              menuGrowRef.current = null;
+              flushSync(() => setMenu(null));
+              void toggleOpen();
+            }}
+          >
+            {open ? '收起面板' : '展开面板'}
+          </button>
+          <button type="button" className="pet-menu-item" onClick={() => void api.closePetWindow()}>
+            隐藏浮窗(托盘可再开)
+          </button>
         </div>
       ) : null}
     </div>

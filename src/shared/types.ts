@@ -356,6 +356,11 @@ export interface AppSettings {
    */
   petImageFirst: boolean;
   /**
+   * 小窗点击穿透:开启后小窗不拦截鼠标(桌面操作直接落到下面的窗口),
+   * 悬停到小图标/面板区域时渲染层会临时恢复交互(借 forward 转发的 mousemove 判断)。
+   */
+  petClickThrough: boolean;
+  /**
    * 上次在图库里浏览的文件夹(相对某个图库根)。
    * 主界面切换文件夹/分类时写入,小窗打开时直接进这一层,两边保持一致。
    */
@@ -548,6 +553,8 @@ export interface ApiSurface {
     reduceEffects: boolean;
     /** 图片优先(左右交替大字图 / 整屏看图,不显示参数文字) */
     imageFirst: boolean;
+    /** 点击穿透是否开启(渲染层据此决定要不要做悬停恢复交互) */
+    clickThrough: boolean;
     /** 上次浏览的文件夹(与主界面一致);null = 还没选过 */
     lastRelDir: string | null;
   }>;
@@ -563,4 +570,10 @@ export interface ApiSurface {
   movePetWindow(bounds: { x: number; y: number; width: number; height: number }): Promise<void>;
   /** 小窗请求关闭自己(退出小窗模式) */
   closePetWindow(): Promise<void>;
+  /**
+   * 点击穿透开启时,渲染层借 forward 转发的 mousemove 判断光标是否悬停在
+   * 小图标/面板上:悬停时调 setPetIgnoreMouse(false) 临时恢复交互,移开再调
+   * setPetIgnoreMouse(true) 恢复穿透。只在 petClickThrough 开启时有意义。
+   */
+  setPetIgnoreMouse(ignore: boolean): Promise<void>;
 }

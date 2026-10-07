@@ -118,6 +118,8 @@ let settings: {
   petIconSize: number;
   petPanelSize: { width: number; height: number };
   petImageFirst: boolean;
+  /** 小窗点击穿透:开启后窗口不拦鼠标,悬停图标/面板时渲染层临时恢复交互 */
+  petClickThrough: boolean;
   lastBrowseRelDir: string | null;
   configVersion: number;
 } = {
@@ -133,6 +135,7 @@ let settings: {
   petPanelSize: { width: 430, height: 620 },
   // 默认"图片优先":小窗里先看见图,参数想看再点开
   petImageFirst: true,
+  petClickThrough: false,
   lastBrowseRelDir: null,
   configVersion: CONFIG_VERSION,
 };
@@ -380,6 +383,40 @@ function defaultPetPosition(iconSize: number): { x: number; y: number } {
 }
 
 /**
+ * 持久化的图标位置是否还在某块屏的可用区域内。
+ *
+ * 多屏/分辨率变化后,上次的坐标可能落在已经拔掉的副屏上 —— 不校验的话
+ * 小窗会开在一个永远看不见的地方,只能去托盘里关了重开(还回不去)。
+ * Display.workArea 是 DIP,与渲染层的 CSS 像素同一坐标系,可以直接比较。
+ */
+function petPositionVisible(pos: { x: number; y: number }): boolean {
+  try {
+    return screen.getAllDisplays().some((d) => {
+      const wa = d.workArea;
+      return pos.x >= wa.x - 8 && pos.x < wa.x + wa.width && pos.y >= wa.y - 8 && pos.y < wa.y + wa.height;
+    });
+  } catch {
+    return true; // 拿不到屏幕信息时不否决用户的位置
+  }
+}
+
+/**
+ * 应用"点击穿透"设置。
+ *
+ * 开启 = setIgnoreMouseEvents(true, { forward: true }):鼠标事件穿透到下面的窗口,
+ * 但 mousemove 会以 forward 形式转发给渲染层 —— 渲染层靠它判断光标是否悬停在
+ * 图标/面板上,悬停时调 setPetIgnoreMouse(false) 临时把交互要回来。
+ */
+function applyPetClickThrough(): void {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  if (settings.petClickThrough === true) {
+    petWindow.setIgnoreMouseEvents(true, { forward: true });
+  } else {
+    petWindow.setIgnoreMouseEvents(false);
+  }
+}
+
+/**
  * 创建小窗。
  *
  * 关键取舍:窗口本身是**透明的、置顶的、不进任务栏**,里面同时装"小图标"和"展开后的工作窗"。
@@ -389,7 +426,13 @@ function defaultPetPosition(iconSize: number): { x: number; y: number } {
 function createPetWindow(): void {
   if (petWindow && !petWindow.isDestroyed()) return;
   const iconSize = Math.max(40, Math.min(160, settings.petIconSize || 64));
-  const pos = settings.petPosition || defaultPetPosition(iconSize);
+  let pos = settings.petPosition || defaultPetPosition(iconSize);
+  // 坐标落在屏幕外(副屏拔了/分辨率变了)就回落到主屏右下角,避免"开了但看不见"
+  if (!petPositionVisible(pos)) {
+    pos = defaultPetPosition(iconSize);
+    settings.petPosition = pos;
+    saveSettings();
+  }
 
   petWindow = new BrowserWindow({
     x: pos.x,
@@ -426,6 +469,8 @@ function createPetWindow(): void {
   // 悬浮在所有普通窗口之上(但不抢焦点)
   petWindow.setAlwaysOnTop(true, 'floating');
   petWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+  // 点击穿透在创建时就生效:否则开了穿透重启后,第一次加载完成前窗口仍能点
+  applyPetClickThrough();
 
   const file = path.join(__dirname, '../renderer/pet.html');
   if (fs.existsSync(file)) {
@@ -1319,6 +1364,8 @@ function registerIpc(): void {
     applyWindowChrome();
     if (petWindow && !petWindow.isDestroyed()) petWindow.setBackgroundColor('#00000000');
     broadcastPetState();
+    // 点击穿透是即时行为:不用等重启,直接对现有小窗生效
+    if (typeof patch.petClickThrough === 'boolean') applyPetClickThrough();
     // 开关"工作小窗"要真的把窗口创建/销毁,而不是只记一个布尔值
     if (typeof wantPet === 'boolean' && wantPet !== (petWindow !== null)) {
       setPetEnabled(wantPet);
@@ -1360,6 +1407,7 @@ function registerIpc(): void {
     position: settings.petPosition,
     reduceEffects: settings.reduceEffects === true,
     imageFirst: settings.petImageFirst !== false,
+    clickThrough: settings.petClickThrough === true,
     lastRelDir: settings.lastBrowseRelDir ?? null,
   }));
 
@@ -1406,6 +1454,16 @@ function registerIpc(): void {
 
   handle('closePetWindow', () => {
     setPetEnabled(false);
+  });
+
+  /**
+   * 点击穿透下的"悬停恢复交互"开关(渲染层借 forward 的 mousemove 判断后调用)。
+   * 只在穿透开启时有意义;穿透关闭时忽略,免得把正常交互关掉。
+   */
+  handle('setPetIgnoreMouse', (ignore: boolean) => {
+    if (!petWindow || petWindow.isDestroyed()) return;
+    if (settings.petClickThrough !== true) return;
+    petWindow.setIgnoreMouseEvents(ignore === true, { forward: true });
   });
 }
 

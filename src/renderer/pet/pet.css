@@ -5,6 +5,53 @@
  * 否则会在桌面上糊出一整块矩形。
  */
 
+/* ---- 玻璃变量(与主界面 src/renderer/main.tsx 同名同义) ----
+   深色是默认;html[data-theme='light'] 覆盖一套亮色;html[data-lite='1'] 关模糊关动画。
+   这些值由 pet/main.tsx 按主进程 getPetState() 的 theme/reduceEffects 写到 <html> 上。 */
+:root {
+  --fg: #f2f4f8;
+  --muted: #b9c0cc;
+  --faint: #9aa2b1;
+  /* 面板/菜单的半透明玻璃底。
+     注意物理限制:透明窗口的 backdrop-filter 模糊不到桌面(只能模糊页面内容),
+     磨砂观感靠"半透明玻璃色 + 边框 + 顶部高光 + 阴影"叠出来;
+     alpha 要比主窗口高,保证任意壁纸上文字可读。 */
+  --glass: rgba(34, 40, 58, 0.78);
+  --glass-2: rgba(40, 46, 64, 0.86);
+  --glass-solid: #15171d; /* 平面模式的(近)不透明兜底 */
+  --glass-border: rgba(255, 255, 255, 0.16);
+  --edge: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  --hairline: color-mix(in srgb, var(--fg) 10%, transparent);
+  --hairline-2: color-mix(in srgb, var(--fg) 6%, transparent);
+  --hover: color-mix(in srgb, var(--fg) 8%, transparent);
+  --hover-strong: color-mix(in srgb, var(--fg) 14%, transparent);
+  --field: color-mix(in srgb, var(--fg) 6%, transparent);
+  --btn-border: color-mix(in srgb, var(--fg) 16%, transparent);
+  --stage-bg: rgba(0, 0, 0, 0.28);
+  --blur: 16px;
+  --sat: 1.7;
+  --radius-lg: 20px;
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+}
+html[data-theme='light'] {
+  --fg: #171b24;
+  --muted: #5c6470;
+  --faint: #7a828f;
+  --glass: rgba(255, 255, 255, 0.85);
+  --glass-2: rgba(255, 255, 255, 0.92);
+  --glass-solid: #f2f4f8;
+  --glass-border: rgba(255, 255, 255, 0.7);
+  --edge: inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  --stage-bg: rgba(0, 0, 0, 0.06);
+}
+/* 平面/兼容模式:关模糊(透明窗口上模糊是白花的开销)、关动画,底色换(近)不透明 */
+html[data-lite='1'] .pet-panel,
+html[data-lite='1'] .pet-menu {
+  backdrop-filter: none;
+  background: var(--glass-solid);
+  animation: none;
+}
+
 /* 面板尺寸是"含边框"的:窗口宽度按面板宽度算,不带 border-box 会多出 2px 被窗口裁掉 */
 .pet-panel {
   box-sizing: border-box;
@@ -88,38 +135,35 @@ body::-webkit-scrollbar,
 .pet-icon .pet-dot { display: none; }
 
 /* 展开后的工作窗 */
-/* 面板:不透明深色。
-   为什么不用半透明/跟随主题:这个窗口是**透明置顶**的,面板后面就是用户桌面 ——
-   亮色主题下近白面板叠在浅色桌面上会发灰,文字像"蒙了一层"(实测过)。
-   贴死不透明 + 高对比文字,任何桌面背景上都清晰。 */
+/* 面板:磨砂玻璃。透明窗口模糊不到桌面(见上方 --glass 注释),
+   观感靠半透明玻璃色 + 1px 边框 + 顶部内高光 + 外阴影;主题走 :root 变量。 */
 .pet-panel {
   position: absolute;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 14px;
-  background: #15171d;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
-  color: #f2f4f8;
-  animation: pet-panel-in 0.18s ease;
+  border-radius: var(--radius-lg);
+  background: var(--glass);
+  backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--edge), 0 18px 44px rgba(0, 0, 0, 0.45);
+  color: var(--fg);
+  animation: pet-panel-in 0.18s var(--ease);
 }
 @keyframes pet-panel-in {
   from { opacity: 0; transform: translateY(10px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+/* 收起:原地播退场动画,窗口此时仍保持展开尺寸(pet/main.tsx 播完才缩窗)。
+   pointer-events 关掉,动画期间不会再误点面板里的按钮 */
 .pet-panel.closing {
-  animation: pet-panel-out 0.14s ease forwards;
+  pointer-events: none;
+  animation: pet-panel-out 0.17s var(--ease) forwards;
 }
 @keyframes pet-panel-out {
   from { opacity: 1; transform: translateY(0) scale(1); }
   to { opacity: 0; transform: translateY(8px) scale(0.98); }
-}
-/* 小窗面板固定深色:上面已说明原因,这里把亮色主题的重写去掉 */
-.pet-panel[data-theme='light'] {
-  background: #15171d;
-  border-color: rgba(255, 255, 255, 0.16);
-  color: #f2f4f8;
 }
 
 .pet-head {
@@ -128,11 +172,8 @@ body::-webkit-scrollbar,
   gap: 6px;
   padding: 9px 10px;
   flex-shrink: 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--hairline);
   font-size: 12px;
-}
-.pet-panel[data-theme='light'] .pet-head {
-  border-bottom-color: rgba(0, 0, 0, 0.08);
 }
 .pet-title {
   flex: 1;
@@ -152,22 +193,15 @@ body::-webkit-scrollbar,
   min-width: 26px;
   padding: 0 7px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--btn-border);
+  background: var(--field);
   color: inherit;
   font: inherit;
   font-size: 12px;
   cursor: pointer;
 }
-.pet-panel[data-theme='light'] .pet-btn {
-  border-color: rgba(0, 0, 0, 0.12);
-  background: rgba(0, 0, 0, 0.04);
-}
 .pet-btn:hover {
-  background: rgba(255, 255, 255, 0.14);
-}
-.pet-panel[data-theme='light'] .pet-btn:hover {
-  background: rgba(0, 0, 0, 0.08);
+  background: var(--hover-strong);
 }
 .pet-btn.primary {
   background: var(--pet-accent, #4f9cf9);
@@ -199,21 +233,15 @@ body::-webkit-scrollbar,
   width: 100%;
   padding: 7px 10px;
   border: 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--hairline-2);
   background: transparent;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
-.pet-panel[data-theme='light'] .pet-card {
-  border-bottom-color: rgba(0, 0, 0, 0.05);
-}
 .pet-card:hover {
-  background: rgba(255, 255, 255, 0.07);
-}
-.pet-panel[data-theme='light'] .pet-card:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--hover);
 }
 .pet-card.active {
   background: color-mix(in srgb, var(--pet-accent, #4f9cf9) 24%, transparent);
@@ -224,7 +252,7 @@ body::-webkit-scrollbar,
   flex-shrink: 0;
   border-radius: 8px;
   object-fit: cover;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--field);
 }
 .pet-meta {
   flex: 1;
@@ -238,7 +266,7 @@ body::-webkit-scrollbar,
 }
 .pet-sub {
   font-size: 10.5px;
-  color: #b9c0cc;
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -247,7 +275,7 @@ body::-webkit-scrollbar,
   padding: 22px 14px;
   text-align: center;
   font-size: 12px;
-  color: #b9c0cc;
+  color: var(--muted);
 }
 
 /* 大图预览 */
@@ -261,7 +289,7 @@ body::-webkit-scrollbar,
   min-height: 0;
   width: 100%;
   object-fit: contain;
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--stage-bg);
 }
 .pet-kv {
   flex-shrink: 0;
@@ -278,7 +306,7 @@ body::-webkit-scrollbar,
 .pet-kv .k {
   flex-shrink: 0;
   width: 62px;
-  color: #b9c0cc;
+  color: var(--muted);
 }
 .pet-kv .v {
   flex: 1;
@@ -300,17 +328,14 @@ body::-webkit-scrollbar,
 .pet-settings h4 {
   margin: 0 0 8px;
   font-size: 12px;
-  color: #b9c0cc;
+  color: var(--muted);
 }
 .pet-row {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-}
-.pet-panel[data-theme='light'] .pet-row {
-  border-bottom-color: rgba(0, 0, 0, 0.06);
+  border-bottom: 1px solid var(--hairline-2);
 }
 .pet-row .label {
   flex: 1;
@@ -323,19 +348,19 @@ body::-webkit-scrollbar,
   width: 44px;
   text-align: right;
   font-family: ui-monospace, Consolas, monospace;
-  color: #b9c0cc;
+  color: var(--muted);
 }
 .pet-hint {
   margin-top: 10px;
   font-size: 10.5px;
-  color: #9aa2b1;
+  color: var(--faint);
   line-height: 1.6;
 }
 .pet-loading {
   padding: 14px;
   text-align: center;
   font-size: 12px;
-  color: #b9c0cc;
+  color: var(--muted);
 }
 
 /* ---- 图片优先(左右交替 / 整屏看图) ----
@@ -356,7 +381,7 @@ body::-webkit-scrollbar,
   aspect-ratio: 16 / 10;
   object-fit: cover;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--field);
 }
 
 /* ---- 文件夹树(主界面同款结构,只显示名字) ----
@@ -380,7 +405,7 @@ body::-webkit-scrollbar,
   justify-content: center;
   border: 0;
   background: none;
-  color: #8f97a6;
+  color: var(--faint);
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
@@ -403,7 +428,7 @@ body::-webkit-scrollbar,
   cursor: pointer;
 }
 .pet-tree-name:hover {
-  background: rgba(255, 255, 255, 0.09);
+  background: var(--hover);
 }
 
 /* ---- 详情:图片占满,文字可选 ---- */
@@ -420,10 +445,7 @@ body::-webkit-scrollbar,
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.28);
-}
-.pet-panel[data-theme="light"] .pet-stage-img {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--stage-bg);
 }
 .pet-stage-img > img {
   width: 100%;
@@ -436,10 +458,7 @@ body::-webkit-scrollbar,
   flex-shrink: 0;
   max-height: 46%;
   overflow-y: auto;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-}
-.pet-panel[data-theme="light"] .pet-viewer .pet-kv {
-  border-top-color: rgba(0, 0, 0, 0.08);
+  border-top: 1px solid var(--hairline);
 }
 
 /* 左右翻页:平时很淡,悬浮才明显 */
@@ -476,4 +495,40 @@ body::-webkit-scrollbar,
   color: #fff;
   font-size: 10.5px;
   font-family: ui-monospace, Consolas, monospace;
+}
+
+/* ---- 图标右键菜单(自绘,磨砂风;不用系统 contextmenu) ----
+   宽度与 pet/main.tsx 的 MENU_W 保持一致(撑大窗口时按它算)。 */
+.pet-menu {
+  position: absolute;
+  z-index: 10;
+  width: 168px;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: 14px;
+  background: var(--glass);
+  backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--edge), 0 12px 32px rgba(0, 0, 0, 0.4);
+  color: var(--fg);
+  animation: pet-panel-in 0.12s var(--ease);
+}
+.pet-menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.pet-menu-item:hover {
+  background: var(--hover);
 }

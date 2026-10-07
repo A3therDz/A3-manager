@@ -163,6 +163,9 @@ const RENDERER_FILES = [
   'src/renderer/main.tsx',
   'src/renderer/App.tsx',
   'src/renderer/api.ts',
+  // 工作小窗(桌宠)入口。注意:它把 window.api 收口到局部 const api 再调用,
+  // 下面的 window.api.xxx 正则抓不到它,登记在这里至少保证文件存在性被检查。
+  'src/renderer/pet/main.tsx',
   // 全局 Window.api 声明。注意:它必须是普通 .ts 模块而不是 .d.ts ——
   // 放在 .d.ts 里时曾整层报 "Property 'api' does not exist on type 'Window'"。
   'src/renderer/global.ts',
