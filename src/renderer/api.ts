@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CategoryNode, FolderNode, ImageQuery, ImageQueryResult,
   ImageRecord, ImageDetail, LibraryStats, ScanProgress, ApiSurface, AppSettings,
-  RecipeStat,
+  RecipeStat, CompareRow,
 } from '@shared/types';
 import type { RecipeRecord } from '@shared/recipes';
 
@@ -169,6 +169,10 @@ function createHttpApi(): ApiSurface {
     deleteRecipe: () => Promise.resolve(),
     recipeCoverUrl: () => '',
     getRecipeStats: () => Promise.resolve([] as RecipeStat[]),
+
+    // 配方比对:浏览器调试后端没有对应端点,保持契约形状的空实现
+    findPromptPeers: () => Promise.resolve([] as CompareRow[]),
+    getCompareRows: () => Promise.resolve([] as CompareRow[]),
 
     // 应用
     getAppInfo: () => desktopOnly('getAppInfo'),

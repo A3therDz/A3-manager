@@ -23,6 +23,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { AssetDb } from './db.ts';
 import { scanLibrary, THUMB_DIR_NAME, META_VERSION, type ScanProgress } from './indexer.ts';
 import { fingerprintOf, normalizeLoraName, type RecipeRecord } from '../shared/recipes.ts';
+import { normalizePrompt, promptTokens, promptTokenSet, similarityToTokenSet, SIMILAR_THRESHOLD } from '../shared/prompts.ts';
+import { buildCompareRows, type CompareRow } from '../shared/compare.ts';
 import type { RecipeStat } from '../shared/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1536,6 +1538,96 @@ function registerIpc(): void {
     console.log(`[recipes] 配方命中统计:${stats.length} 个配方,${Date.now() - t0}ms`);
     recipeStatsCache = { sig, gen: indexGeneration, stats };
     return stats;
+  });
+
+  // ---- 配方比对(v0.8):同一提示词换不同 LoRA 配方出图,横向比对效果
+  /** 相似模式的召回上限:LIKE 预筛最多取这么多张候选,再用相似度筛 */
+  const PEER_CANDIDATE_LIMIT = 3000;
+  /** 比对行里最多拿 8 个 token 做 LIKE 预筛(OR 连接,再多扫得慢) */
+  const PEER_TOKEN_LIMIT = 8;
+
+  /**
+   * 提示词**完全相同**的图 id。
+   *
+   * 为什么是两个键:
+   *   - 原文键 `trim + 小写` 与 SQL 的 `lower(trim(pos_prompt))` 语义**逐字对齐** ——
+   *     这是"同一提示词"的准确口径(ComfyUI 的提示词常带换行与连续空白,
+   *     SQL 侧不折叠空白,所以这里也绝不能折叠)。实测:真实库 17946 张里
+   *     带换行的提示词组用"折叠空白"的键会一张都找不到,这是必须踩准的一步。
+   *   - 归一化键(normalizePrompt:折叠空白 + 剥 `(word:1.3)`)只在原文键几乎没命中时才试,
+   *     用来兜住"同一条提示词、空白写法不同"的情况(SQL 做不到归一化,只能这样补)。
+   */
+  function exactPeerIds(basePrompt: string, lim: number): number[] {
+    const rawKey = basePrompt.trim().toLowerCase();
+    const ids = db.peerIdsByPrompt(rawKey, lim);
+    if (ids.length > 1) return ids;
+    const normKey = normalizePrompt(basePrompt);
+    if (normKey === rawKey) return ids;
+    const alt = db.peerIdsByPrompt(normKey, lim);
+    return alt.length > ids.length ? alt : ids;
+  }
+
+  /**
+   * 按提示词找同类图(精确 / 相似两档),结果永远包含基准图自己。
+   *
+   * 相似档的召回池 = 「原文键完全相同的那些」∪「LIKE 预筛命中的候选」:
+   *   - 前者保证"同一提示词"的图**一张都不漏**(这是用户的主场景);SQL 全表扫描 ~200ms;
+   *   - 后者负责"改过几个词"的近似图:拿 8 个**最长 token** 做 `LIKE '%tok%'` OR 连接
+   *     (token 越长越具体;短 token 像 `or` 几乎全库命中),按 mtime 倒序取 3000 张。
+   *     真实库里常见 token(masterpiece/quality…)的命中面很大,这一档的召回是**面向最近的图**
+   *     的(排序 + 上限的必然结果,已在 v0.8-改进说明里写明限制)。
+   */
+  handle('findPromptPeers', (imageId: number, similar: boolean, limit?: number) => {
+    const t0 = Date.now();
+    const row = db.getImageRow(Number(imageId));
+    const basePrompt = typeof row?.pos_prompt === 'string' ? row.pos_prompt : '';
+    if (!basePrompt.trim()) return []; // 没有提示词 → 没法按提示词找同类(界面给专门文案)
+    const lim = typeof limit === 'number' && limit > 0 ? Math.min(500, Math.floor(limit)) : 200;
+    const id = Number(imageId);
+
+    let ids: number[];
+    if (similar === true) {
+      const same = exactPeerIds(basePrompt, lim);
+      const toks = promptTokens(basePrompt)
+        .sort((a, b) => b.length - a.length)
+        .slice(0, PEER_TOKEN_LIMIT);
+      const like = db.candidateIdsByTokens(toks, PEER_CANDIDATE_LIMIT);
+      const cand = [...new Set([id, ...same, ...like])];
+      const prompts = new Map(db.getPromptsByIds(cand).map((p) => [p.id, p.prompt]));
+      // 基准图的 token 集合只算一次:几千字符的长提示词上,逐条重算会多花接近 1 秒
+      const baseTokens = promptTokenSet(basePrompt);
+      const kept: Array<{ id: number; sim: number }> = [];
+      for (const cid of cand) {
+        if (cid === id) continue;
+        const sim = similarityToTokenSet(baseTokens, prompts.get(cid) ?? '');
+        if (sim >= SIMILAR_THRESHOLD) kept.push({ id: cid, sim });
+      }
+      // 相似度降序(相同则保持候选的 mtime 倒序,JS 的 sort 是稳定排序)
+      kept.sort((a, b) => b.sim - a.sim);
+      ids = [id, ...kept.slice(0, Math.max(0, lim - 1)).map((k) => k.id)];
+    } else {
+      ids = exactPeerIds(basePrompt, lim);
+      if (!ids.includes(id)) ids.unshift(id);
+    }
+
+    const rows: CompareRow[] = buildCompareRows(db.getCompareBasics(ids), readAllRecipes(), basePrompt);
+    console.log(`[compare] findPromptPeers(#${id}, ${similar ? '相似' : '精确'}) → ${rows.length} 张,${Date.now() - t0}ms`);
+    return rows;
+  });
+
+  /**
+   * 多选批量条进入比对:直接拿选中的这几张图当一列列行,similarity 以第一张为基准。
+   * 超过 12 张截断(一屏看不下,再多的图也会被列分组摊得没法读)。
+   */
+  handle('getCompareRows', (ids: number[]) => {
+    const list = (Array.isArray(ids) ? ids : [])
+      .map((x) => Number(x))
+      .filter((n) => Number.isInteger(n) && n > 0);
+    const uniq = [...new Set(list)].slice(0, 12);
+    if (uniq.length === 0) return [];
+    const basics = db.getCompareBasics(uniq);
+    const basePrompt = basics[0]?.prompt ?? '';
+    return buildCompareRows(basics, readAllRecipes(), basePrompt);
   });
 
   handle('saveRecipe', (input: RecipeRecord) => {

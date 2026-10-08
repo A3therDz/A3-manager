@@ -11,13 +11,15 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CategoryNode, DetailTarget, DroppedInspection, FolderNode, ImageQuery, LibraryRoot, RecipeRecord, RecipeStat, SortKey } from '@shared/types';
+import type { CategoryNode, CompareRow, DetailTarget, DroppedInspection, FolderNode, ImageQuery, ImageRecord, LibraryRoot, RecipeRecord, RecipeStat, SortKey } from '@shared/types';
 import { errMsg, useCategories, useFolders, useImageDetail, useImages, useScanProgress, useStats } from './api';
 import { CategoryTree, FolderTree, FolderVisibilityTree, RecipeTree } from './components/Trees';
 import { ImageGrid } from './components/ImageGrid';
 import { DetailPanel } from './components/DetailPanel';
 import { CategoryPicker } from './components/CategoryPicker';
 import { Lightbox } from './components/Lightbox';
+import { ComparePanel } from './components/ComparePanel';
+import { CompareStage } from './components/CompareStage';
 import { RecipeManager, type RecipeDraftLora } from './components/RecipeManager';
 import { endImageDrag, hasImageDragData, isInternalImageDrag } from './dnd';
 import { prefersReducedMotion, useDelayedClose } from './useDelayedClose';
@@ -407,6 +409,36 @@ export function App() {
   }, [openToast, closeToast]);
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
+  /**
+   * 查看器的行来源:默认是"当前标签页已加载列表"(翻页范围)。
+   * 从配方比对的某一列打开时,换成那一列的图 —— 这样在列内也能左右翻页,
+   * 而不是翻到整个标签页里去(两边混着翻会看不出比对的是哪几列)。
+   */
+  const [lightboxRows, setLightboxRows] = useState<ImageRecord[] | null>(null);
+  const openLightboxInList = useCallback(
+    (id: number) => {
+      setLightboxRows(null);
+      openLightbox(id);
+    },
+    [openLightbox]
+  );
+  /** 从比对面板的一列打开查看器:先取那一列的完整行(查看器要用 fileName/relPath 等) */
+  const openLightboxInColumn = useCallback(
+    (ids: number[], id: number) => {
+      window.api
+        .getImagesByIds(ids)
+        .then((recs) => {
+          const clean = recs.filter(Boolean) as ImageRecord[];
+          if (clean.length === 0) return;
+          setLightboxRows(clean);
+          openLightbox(id);
+        })
+        .catch((e) => notify(errMsg(e), true));
+    },
+    [openLightbox, notify]
+  );
+  const lbRows = lightboxRows && lightboxRows.some((r) => r.id === lightboxId) ? lightboxRows : rows;
+
   // ---- 设置:主题(暗/亮) + 关闭行为(缩小到托盘/直接关闭)
   const [theme, setTheme] = useState<'dark' | 'light'>(
     () => (document.documentElement.dataset.theme === 'light' ? 'light' : 'dark')
@@ -453,6 +485,77 @@ export function App() {
   // 配方管理弹层;initialLoras 非空时直接进新建表单(详情面板「存为配方」)
   const { value: recipeModal, closing: recipeClosing, open: openRecipeModal, close: closeRecipeModal } =
     useDelayedClose<{ initialLoras?: RecipeDraftLora[] }>();
+
+  // ---- 配方比对(v0.8):两个入口,共用同一个面板
+  //   ① 详情面板 LoRA 区「配方比对」→ findPromptPeers(按提示词找同类图,可切精确/相似)
+  //   ② 多选批量条「比对」→ getCompareRows(把选中的几张当一组,没有模式切换)
+  const { value: compareReq, closing: compareClosing, open: openCompareModal, close: closeCompareModal } =
+    useDelayedClose<{ baseId: number; baseName: string; basePrompt: string; canSwitch: boolean; count: number }>();
+  const { value: compareStageRows, closing: compareStageClosing, open: openCompareStage, close: closeCompareStage } =
+    useDelayedClose<CompareRow[]>();
+  const [compareRows, setCompareRows] = useState<CompareRow[]>([]);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  /** 相似模式开关(只在 fromDetail 时可见) */
+  const [compareMode, setCompareMode] = useState<'exact' | 'similar'>('exact');
+  /** 请求序号:切模式/换基准图时丢弃过期响应(慢的那次不能盖掉新的) */
+  const compareSeqRef = useRef(0);
+
+  /** 按提示词找同类图(精确 / 相似) */
+  const loadComparePeers = useCallback((baseId: number, mode: 'exact' | 'similar') => {
+    const seq = ++compareSeqRef.current;
+    setCompareLoading(true);
+    setCompareError(null);
+    window.api
+      .findPromptPeers(baseId, mode === 'similar')
+      .then((rs) => {
+        if (seq === compareSeqRef.current) setCompareRows(rs);
+      })
+      .catch((e) => {
+        if (seq === compareSeqRef.current) {
+          setCompareRows([]);
+          setCompareError(errMsg(e));
+        }
+      })
+      .finally(() => {
+        if (seq === compareSeqRef.current) setCompareLoading(false);
+      });
+  }, []);
+
+  /** ① 详情面板进入:基准图的提示词从已加载的详情里取(空提示词要给出专门文案) */
+  const openCompareFromDetail = useCallback(
+    (imageId: number) => {
+      const info = detail.detail.data && detail.detail.data.id === imageId ? detail.detail.data : null;
+      const prompt = info?.meta?.prompts?.find((p) => p.role === 'positive')?.text ?? '';
+      const name = info?.fileName ?? rows.find((r) => r.id === imageId)?.fileName ?? '';
+      setCompareMode('exact');
+      setCompareRows([]);
+      openCompareModal({ baseId: imageId, baseName: name, basePrompt: prompt, canSwitch: true, count: 0 });
+      if (prompt.trim() === '') {
+        compareSeqRef.current++; // 没有提示词:不发请求,只给空态文案
+        setCompareLoading(false);
+        setCompareError(null);
+        return;
+      }
+      loadComparePeers(imageId, 'exact');
+    },
+    [detail.detail.data, rows, openCompareModal, loadComparePeers]
+  );
+
+  const switchCompareMode = useCallback(
+    (m: 'exact' | 'similar') => {
+      if (!compareReq || m === compareMode) return;
+      setCompareMode(m);
+      loadComparePeers(compareReq.baseId, m);
+    },
+    [compareReq, compareMode, loadComparePeers]
+  );
+
+  const closeCompareAll = useCallback(() => {
+    closeCompareStage();
+    closeCompareModal();
+  }, [closeCompareStage, closeCompareModal]);
+
   const [closeToTray, setCloseToTray] = useState(true);
   // 平面模式:关掉实时模糊与进场动画(显卡弱 / 远程桌面时用)
   const [reduceEffects, setReduceEffects] = useState(false);
@@ -834,6 +937,42 @@ export function App() {
     [rows, selectedIds, openSelection]
   );
 
+  /**
+   * ② 配方比对的第二个入口(多选批量条):选中的几张直接当一组列出来,
+   * 顺序 = 勾选顺序,similarity 以第一张的提示词为基准;没有"同提示词/相似"切换
+   * (这一档是"我手动挑了这几张来比",不是按提示词找的)。
+   */
+  const openCompareFromSelection = useCallback(() => {
+    const ids = [...selectedIds];
+    if (ids.length < 2) return;
+    const seq = ++compareSeqRef.current;
+    setCompareMode('exact');
+    setCompareRows([]);
+    setCompareLoading(true);
+    setCompareError(null);
+    openCompareModal({
+      baseId: ids[0],
+      baseName: rows.find((r) => r.id === ids[0])?.fileName ?? `#${ids[0]}`,
+      basePrompt: '',
+      canSwitch: false,
+      count: ids.length,
+    });
+    window.api
+      .getCompareRows(ids)
+      .then((rs) => {
+        if (seq === compareSeqRef.current) setCompareRows(rs);
+      })
+      .catch((e) => {
+        if (seq === compareSeqRef.current) {
+          setCompareRows([]);
+          setCompareError(errMsg(e));
+        }
+      })
+      .finally(() => {
+        if (seq === compareSeqRef.current) setCompareLoading(false);
+      });
+  }, [selectedIds, rows, openCompareModal]);
+
   /** 多选模式下单击卡片 = 切换选中;平时单击 = 开详情(Ctrl/Shift 语义在 ImageGrid 里保持不变) */
   const handleOpen = useCallback(
     (id: number) => {
@@ -1054,15 +1193,15 @@ export function App() {
     if (viewIdx >= 0 && viewIdx < rows.length - 1) setSelectedId(rows[viewIdx + 1].id);
   }, [rows, viewIdx]);
 
-  /** 查看器翻页:与详情翻页同一份 rows(当前标签页已加载列表) */
+  /** 查看器翻页:当前标签页已加载列表(或"从比对列打开"时的那一列) */
   const lightboxStep = useCallback(
     (dir: 1 | -1) => {
       if (lightboxId === null) return;
-      const i = rows.findIndex((r) => r.id === lightboxId);
+      const i = lbRows.findIndex((r) => r.id === lightboxId);
       const j = i + dir;
-      if (i >= 0 && j >= 0 && j < rows.length) openLightbox(rows[j].id);
+      if (i >= 0 && j >= 0 && j < lbRows.length) openLightbox(lbRows[j].id);
     },
-    [lightboxId, rows, openLightbox]
+    [lightboxId, lbRows, openLightbox]
   );
 
   // 键盘:Esc 关详情/菜单/设置,← → 翻页,/ 聚焦搜索,Ctrl+T/W/Tab 管标签页
@@ -1103,8 +1242,16 @@ export function App() {
         return;
       }
       if (e.key === 'Escape') {
-        // 查看器优先级最高:先关查看器,不关它下面的详情面板
+        /**
+         * Esc 链:查看器 → 并排比对台 → 比对面板 → … 逐层往下(按 z-index 从高到低)
+         * 关上面那层**绝不顺手关下面**:比如并排台开着时按 Esc 只收并排台,
+         * 底下的比对面板(以及它里面的勾选)原样留着。
+         * 查看器排在比对面板前面:它会盖在面板上(从某个配方列里点开的那张图),
+         * 所以要先收它;只从网格打开的查看器下面没有面板,同样先收它。
+         */
         if (lightboxId !== null) closeLightbox();
+        else if (compareStageRows) closeCompareStage();
+        else if (compareReq) closeCompareModal();
         else if (folderMenu) closeFolderMenu();
         else if (moreMenu) closeMoreMenu();
         else if (selectedIds.size) closeSelection();
@@ -1125,6 +1272,8 @@ export function App() {
         else if (e.key === 'ArrowRight') lightboxStep(1);
         return;
       }
+      // 并排比对台开着时:方向键不再翻详情
+      if (compareStageRows || compareReq) return;
       if (
         selectedId === null ||
         menu ||
@@ -1148,6 +1297,8 @@ export function App() {
     selectMode, exitSelectMode, closeFolderMenu, closeMoreMenu, closeSelection,
     closeMenu, closeConfirmBatchDelete, closeRemoveRoot, closeConfirmDelete,
     closeSettings, lightboxId, lightboxStep, closeLightbox, recipeModal, closeRecipeModal,
+    // 配方比对的两个层级:Esc 链最上面两层(见上面的注释)
+    compareStageRows, closeCompareStage, compareReq, closeCompareModal,
     // closeDetail 在后面才声明,进 deps 会触发 TDZ;它是稳定的 useCallback,缺失无影响
     // eslint-disable-next-line react-hooks/exhaustive-deps
   ]);
@@ -1962,7 +2113,7 @@ export function App() {
                 zoom={gridZoom}
                 openId={selectedId}
                 // 多选模式下双击不抢"单击=切换选中"的语义
-                onOpenViewer={(id) => { if (!selectMode) openLightbox(id); }}
+                onOpenViewer={(id) => { if (!selectMode) openLightboxInList(id); }}
                 onDragEnd={() => endImageDrag()}
               />
             </>
@@ -2001,9 +2152,10 @@ export function App() {
                   .then(() => notify('路径已复制'))
                   .catch((e) => notify(errMsg(e), true))
               }
-              onOpenViewer={(id) => openLightbox(id)}
+              onOpenViewer={(id) => openLightboxInList(id)}
               recipes={recipes}
               onSaveRecipe={(ls) => openRecipeModal({ initialLoras: ls })}
+              onCompare={openCompareFromDetail}
               onChanged={refreshCategories}
               notify={notify}
             />
@@ -2236,6 +2388,15 @@ export function App() {
           </button>
           <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => void openRemoveCatPicker([...selectedIds])}>
             移出分类…
+          </button>
+          <button
+            type="button"
+            className="cam-sb-btn"
+            disabled={selectedIds.size < 2}
+            title={selectedIds.size < 2 ? '至少选 2 张才能比对' : '把这几张按配方分列并排比对'}
+            onClick={openCompareFromSelection}
+          >
+            比对
           </button>
           <button type="button" className="cam-sb-btn" disabled={!selectedIds.size} onClick={() => void batchStar()}>
             {firstSelectedStarred ? '取消收藏' : '收藏'}
@@ -2709,10 +2870,35 @@ export function App() {
 
       {toast ? <div className={`cam-toast${toast.bad ? ' bad' : ''}${toastClosing ? ' closing' : ''}`}>{toast.msg}</div> : null}
 
+      {/* 配方比对面板(z-index 380)与并排比对台(390):都压在详情/网格之上,
+          但查看器(400)更高 —— 从比对列点图看原图时才不会被面板挡住 */}
+      {compareReq ? (
+        <ComparePanel
+          baseId={compareReq.baseId}
+          baseName={compareReq.baseName}
+          basePrompt={compareReq.basePrompt}
+          rows={compareRows}
+          loading={compareLoading}
+          error={compareError}
+          mode={compareReq.canSwitch ? compareMode : null}
+          onModeChange={switchCompareMode}
+          selectedCount={compareReq.count}
+          recipes={recipes}
+          closing={compareClosing}
+          onClose={() => closeCompareAll()}
+          onOpenViewer={openLightboxInColumn}
+          onComparePicked={(picked) => openCompareStage(picked)}
+        />
+      ) : null}
+
+      {compareStageRows ? (
+        <CompareStage rows={compareStageRows} closing={compareStageClosing} onClose={closeCompareStage} />
+      ) : null}
+
       {/* 全屏原图查看器:压在所有弹层之上(z-index 400),Esc 先关它(见键盘钩子) */}
       {lightboxId !== null ? (
         <Lightbox
-          rows={rows}
+          rows={lbRows}
           id={lightboxId}
           closing={lightboxClosing}
           onClose={closeLightbox}

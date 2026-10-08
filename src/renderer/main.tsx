@@ -436,6 +436,8 @@ style.textContent = `
   html[data-lite='1'] .cam-modal.closing,
   html[data-lite='1'] .cam-modal.closing > div,
   html[data-lite='1'] .cam-lightbox.closing,
+  html[data-lite='1'] .cam-cmp.closing,
+  html[data-lite='1'] .cam-cmp2.closing,
   html[data-lite='1'] .cam-toast.closing { animation-duration: 1ms !important; }
 
   /* 文件拖进窗口时的提示层:固定盖住整屏,既不拦截事件也不引起重排 */
@@ -719,6 +721,8 @@ style.textContent = `
   }
   html[data-lite='1'] .cam-side,
   html[data-lite='1'] .cam-gridwrap,
+  html[data-lite='1'] .cam-cmp,
+  html[data-lite='1'] .cam-cmp2,
   html[data-lite='1'] .cam-detail { background: var(--panel) !important; }
   /* 平面模式:sticky 顶栏退回实色(不透过下面滚动的内容) */
   html[data-lite='1'] .cam-detail-head { background: var(--panel); }
@@ -761,8 +765,88 @@ style.textContent = `
   .cam-recipe-fav.on { color: #ffd166; }
   .cam-recipe-fav:active { transform: scale(1.25); }
 
+  /* ---- 配方比对(v0.8)----
+     面板压在整个滚动网格上:97% 不透明底色(var(--modal-bg)),不开 backdrop-filter;
+     分列区横向滚动,列内纵向滚动。缩略图一律走 cam-thumb(几十张原图一起加载会卡)。 */
+  .cam-cmp { position: fixed; inset: 0; z-index: 380; background: var(--modal-bg);
+    display: flex; flex-direction: column; animation: cam-fade var(--dur-2) var(--ease); }
+  .cam-cmp.closing { animation: cam-fade-out var(--dur-1) var(--ease) forwards; }
+  .cam-cmp-top { display: flex; align-items: center; gap: 10px; padding: 9px 12px; font-size: 12px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .cam-cmp-title { font-weight: 600; flex-shrink: 0; }
+  .cam-cmp-base { color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .cam-cmp-modes { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .cam-cmp-count { flex: 1; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .cam-cmp-hint { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+  .cam-lb-btn.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .cam-cmp-promptwrap { padding: 6px 12px 0; flex-shrink: 0; }
+  .cam-cmp-promptbtn { background: none; border: 0; color: var(--muted); font: inherit; font-size: 11px;
+    cursor: pointer; padding: 2px 4px; border-radius: 4px; }
+  .cam-cmp-promptbtn:hover { color: var(--accent); }
+  .cam-cmp-prompt { margin: 6px 0 0; padding: 8px 10px; max-height: 150px; overflow: auto;
+    background: var(--inset); border: 1px solid var(--border); border-radius: 6px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word; color: var(--fg); }
+  .cam-cmp-body { flex: 1; min-height: 0; display: flex; }
+  .cam-cmp-empty { margin: auto; max-width: 460px; padding: 0 20px; text-align: center;
+    color: var(--muted); font-size: 12.5px; line-height: 1.7; }
+  .cam-cmp-cols { display: flex; gap: 10px; padding: 10px 12px; width: 100%;
+    overflow-x: auto; overflow-y: hidden; min-height: 0; }
+  .cam-cmp-col { flex: 0 0 236px; min-height: 0; display: flex; flex-direction: column;
+    border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+    background: color-mix(in srgb, var(--panel2) 55%, transparent); }
+  .cam-cmp-colhead { display: flex; align-items: center; gap: 8px; padding: 8px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .cam-cmp-coltitle { min-width: 0; }
+  .cam-cmp-colname { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .cam-cmp-colsub { font-size: 10.5px; color: var(--muted); }
+  .cam-cmp-diff { padding: 5px 8px; font-size: 10.5px; line-height: 1.5; flex-shrink: 0;
+    border-bottom: 1px solid var(--border); word-break: break-all; }
+  .cam-cmp-diff-same { color: var(--muted); }
+  .cam-cmp-diff-add { color: var(--ok); }
+  .cam-cmp-diff-del { color: var(--bad); }
+  .cam-cmp-colbody { flex: 1; min-height: 0; overflow-y: auto; padding: 8px;
+    display: flex; flex-direction: column; gap: 8px; }
+  .cam-cmp-card { position: relative; border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; background: color-mix(in srgb, var(--panel) 70%, transparent); }
+  .cam-cmp-card.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .cam-cmp-card.base::after { content: '基准'; position: absolute; right: 6px; top: 6px; z-index: 2;
+    font-size: 10px; color: var(--accent); background: var(--accent-bg); border-radius: 999px;
+    padding: 0 6px; line-height: 15px; }
+  .cam-cmp-thumb { display: block; width: 100%; padding: 0; border: 0; background: none;
+    cursor: zoom-in; line-height: 0; }
+  .cam-cmp-thumb img { width: 100%; height: 132px; object-fit: cover; display: block; }
+  .cam-cmp-pick { position: absolute; left: 6px; top: 6px; z-index: 2; display: flex;
+    align-items: center; gap: 4px; padding: 2px 5px; border-radius: 6px;
+    background: color-mix(in srgb, var(--panel2) 78%, transparent); cursor: pointer; }
+  .cam-cmp-pick.full { opacity: .45; cursor: default; }
+  .cam-cmp-meta { display: flex; justify-content: space-between; gap: 6px; padding: 4px 7px 0;
+    font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .cam-cmp-seed { color: var(--accent); }
+  .cam-cmp-name { padding: 0 7px 3px; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .cam-cmp-sim { padding: 0 7px 6px; font-size: 10.5px; color: var(--muted); }
+  .cam-cmp-bar { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 8px 12px; border-top: 1px solid var(--border); }
+
+  /* 并排比对台:层级高于比对面板(390),但低于查看器(400)*/
+  .cam-cmp2 { position: fixed; inset: 0; z-index: 390; background: var(--modal-bg);
+    display: flex; flex-direction: column; animation: cam-fade var(--dur-2) var(--ease); }
+  .cam-cmp2.closing { animation: cam-fade-out var(--dur-1) var(--ease) forwards; }
+  .cam-cmp2-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; touch-action: none; }
+  .cam-cmp2-track { display: flex; width: 100%; height: 100%; transform-origin: center center; }
+  .cam-cmp2-cell { flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: center;
+    padding: 8px; }
+  .cam-cmp2-cell img { max-width: 100%; max-height: 100%; display: block; user-select: none;
+    box-shadow: 0 8px 30px rgba(0,0,0,.42); }
+  .cam-cmp2-labels { flex-shrink: 0; display: flex; padding: 0 8px 10px; }
+  .cam-cmp2-label { flex: 1 1 0; min-width: 0; padding: 0 4px; font-size: 11px; color: var(--muted);
+    text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
   @media (prefers-reduced-motion: reduce) {
-    .cam-card, .cam-detail, .cam-modal, .cam-modal > div, .cam-menu, .cam-toast, .cam-selectbar, .cam-tab, .cam-lightbox, .cam-recipe-body { animation: none !important; }
+    .cam-card, .cam-detail, .cam-modal, .cam-modal > div, .cam-menu, .cam-toast, .cam-selectbar, .cam-tab, .cam-lightbox, .cam-cmp, .cam-cmp2, .cam-recipe-body { animation: none !important; }
     .cam-detail-slot { transition: none; }
     .cam-card img { opacity: 1 !important; transition: none; }
     .cam-card:hover { transform: none; }

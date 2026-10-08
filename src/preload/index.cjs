@@ -128,6 +128,10 @@ const api = {
   // 配方封面:纯前端拼接,不走 IPC(同 getThumbUrl)
   recipeCoverUrl: (id) => `cam-recipe://cover/${encodeURIComponent(id)}`,
 
+  // ---- 配方比对(v0.8)
+  findPromptPeers: (imageId, similar, limit) => call('findPromptPeers', imageId, similar, limit),
+  getCompareRows: (ids) => call('getCompareRows', ids),
+
   // ---- 应用
   getAppInfo: () => call('getAppInfo'),
   setAutoLaunch: (enabled) => call('setAutoLaunch', enabled),

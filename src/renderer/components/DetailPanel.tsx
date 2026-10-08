@@ -50,6 +50,8 @@ interface Props {
   recipes: RecipeRecord[];
   /** 「存为配方」:把当前图的全部 LoRA 预填进新建配方表单 */
   onSaveRecipe: (loras: { file_name: string; strength: number }[]) => void;
+  /** 「配方比对」:按提示词找同类图并分列(仅索引图有 id 可查) */
+  onCompare?: (id: number) => void;
   /** 分类归属变化后回调,父组件负责刷新分类树与网格标记 */
   onChanged: () => void;
   /** 轻提示 */
@@ -270,6 +272,7 @@ export function DetailPanel({
   onOpenViewer,
   recipes,
   onSaveRecipe,
+  onCompare,
   onChanged,
   notify,
 }: Props) {
@@ -520,17 +523,31 @@ export function DetailPanel({
         <Section
           title={`LoRA (${loras.length})`}
           extra={
-            loras.length > 0 ? (
-              <button
-                type="button"
-                style={miniBtn}
-                title="把这张图的全部 LoRA 存成一个配方(权重与图一致)"
-                onClick={() =>
-                  onSaveRecipe(loras.map((l) => ({ file_name: l.name, strength: l.strengthModel ?? 1 })))
-                }
-              >
-                存为配方
-              </button>
+            loras.length > 0 || (indexed && onCompare) ? (
+              <>
+                {loras.length > 0 ? (
+                  <button
+                    type="button"
+                    style={miniBtn}
+                    title="把这张图的全部 LoRA 存成一个配方(权重与图一致)"
+                    onClick={() =>
+                      onSaveRecipe(loras.map((l) => ({ file_name: l.name, strength: l.strengthModel ?? 1 })))
+                    }
+                  >
+                    存为配方
+                  </button>
+                ) : null}
+                {indexed && onCompare ? (
+                  <button
+                    type="button"
+                    style={miniBtn}
+                    title="按提示词找同一 / 相似提示词的其它图,并按命中的配方分列比对"
+                    onClick={() => onCompare(indexed.id)}
+                  >
+                    配方比对
+                  </button>
+                ) : null}
+              </>
             ) : null
           }
         >

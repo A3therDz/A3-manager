@@ -176,6 +176,9 @@ const RENDERER_FILES = [
   'src/renderer/components/ImageGrid.tsx',
   'src/renderer/components/DetailPanel.tsx',
   'src/renderer/components/RecipeManager.tsx',
+  // 配方比对(v0.8):面板与并排比对台
+  'src/renderer/components/ComparePanel.tsx',
+  'src/renderer/components/CompareStage.tsx',
 ];
 const apiMethodSet = new Set<string>();
 {

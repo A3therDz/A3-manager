@@ -1,7 +1,10 @@
 import type { RecipeRecord } from './recipes';
+import type { CompareRow } from './compare';
 
 // LoRA 配方的记录类型定义在 ./recipes(与匹配逻辑同处,纯 TS 可被 verify 脚本直接 import)
 export type { RecipeRecord, RecipeLora } from './recipes';
+// 配方比对的行/分组类型定义在 ./compare(同上:纯 TS,verify 直接测)
+export type { CompareRow, CompareGroup, CompareDiff, CompareLora } from './compare';
 
 /**
  * 前后端共享类型契约 —— 冻结文件。
@@ -560,6 +563,24 @@ export interface ApiSurface {
   recipeCoverUrl(id: string): string;
   /** 每个配方当前命中的图片数(子集匹配口径;主进程内有缓存,配方或索引变化后自动失效) */
   getRecipeStats(): Promise<RecipeStat[]>;
+
+  // ---- 配方比对(v0.8)
+  // 场景:同一个提示词换不同 LoRA 配方出图,然后横向比对效果。
+  /**
+   * 按提示词找"同类图",并按命中的配方分列展示用。
+   *
+   * @param imageId 基准图(取它的 pos_prompt 作参照)
+   * @param similar false = 提示词完全相同(小写 + 收空白后全等);
+   *                true  = 相似(≥ SIMILAR_THRESHOLD,见 src/shared/prompts.ts),按相似度降序
+   * @param limit   最多返回多少张(默认 200)
+   * 结果**永远包含基准图自己**(similarity = 1);基准图没有提示词时返回空数组。
+   */
+  findPromptPeers(imageId: number, similar: boolean, limit?: number): Promise<CompareRow[]>;
+  /**
+   * 取指定几张图作为一组比对行(多选批量条进入比对用)。
+   * similarity 以 ids[0] 的提示词为基准;空数组返回空,最多取前 12 张。
+   */
+  getCompareRows(ids: number[]): Promise<CompareRow[]>;
 
   /**
    * 把图片**原文件**拖出到别的应用(ComfyUI / NovelAI 会直接读到 PNG 里的元数据)。

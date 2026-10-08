@@ -16,6 +16,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { normalizeLoraName } from '../shared/recipes.ts';
+import type { CompareBasic } from '../shared/compare.ts';
 
 // ---------------------------------------------------------------- 类型
 
@@ -767,6 +768,126 @@ export class AssetDb {
     return out;
   }
 
+  // ------------------------------------------------------------ 配方比对(v0.8)
+
+  /**
+   * 提示词**完全相同**的图 id(精确模式)。
+   *
+   * 口径:`lower(trim(pos_prompt)) = ?` —— 与 shared/prompts.ts 的 normalizePrompt 的
+   * "小写 + 收空白"一致,但**不剥强调权重语法**(`(word:1.3)` 这类差异交给"相似"模式兜住),
+   * 因为 SQL 侧没法复现那套括号规则。pos_prompt 没有索引,这里是全表扫描
+   * (1.8 万行实测百毫秒级,可接受)。参数一律绑定,不拼用户内容进 SQL。
+   */
+  peerIdsByPrompt(normalizedPrompt: string, limit: number): number[] {
+    const key = String(normalizedPrompt ?? '').trim().toLowerCase();
+    if (!key) return [];
+    const lim = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 200;
+    return (
+      this.db
+        .prepare(
+          `SELECT id FROM images
+           WHERE pos_prompt IS NOT NULL AND lower(trim(pos_prompt)) = ?
+           ORDER BY file_mtime DESC, id DESC LIMIT ?`
+        )
+        .all(key, lim) as Array<{ id: number }>
+    ).map((r) => r.id);
+  }
+
+  /**
+   * 相似模式的**召回**预筛:`pos_prompt LIKE '%token%'` 的 OR 连接(最多 8 个 token)。
+   *
+   * 这里只负责"别漏",真正的相似度判定由调用方用 shared/prompts.ts 的
+   * promptSimilarity 逐条算(阈值 0.85)。按 mtime 倒序 + LIMIT 保证截断时留下的是新图;
+   * LIKE 元字符走 escapeLike + ESCAPE '!',token 只做子串匹配(命中偏多,由相似度收口)。
+   */
+  candidateIdsByTokens(tokens: string[], limit: number): number[] {
+    const toks = (Array.isArray(tokens) ? tokens : [])
+      .map((t) => String(t ?? '').trim().toLowerCase())
+      .filter((t) => t.length >= 2)
+      .slice(0, 8);
+    if (toks.length === 0) return [];
+    const lim = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 3000;
+    const where = toks.map(() => `pos_prompt LIKE ? ESCAPE '!'`).join(' OR ');
+    const params = toks.map((t) => `%${escapeLike(t)}%`);
+    return (
+      this.db
+        .prepare(
+          `SELECT id FROM images
+           WHERE pos_prompt IS NOT NULL AND (${where})
+           ORDER BY file_mtime DESC, id DESC LIMIT ?`
+        )
+        .all(...params, lim) as Array<{ id: number }>
+    ).map((r) => r.id);
+  }
+
+  /** 只要提示词(相似度预筛用):候选可能上千条,单独取一列比整行便宜得多 */
+  getPromptsByIds(ids: number[]): Array<{ id: number; prompt: string | null }> {
+    const uniq = uniqueIds(ids);
+    const out: Array<{ id: number; prompt: string | null }> = [];
+    // 分片绑定:上千个占位符会撞上 SQLite 的变量数上限
+    for (const chunk of chunkIds(uniq)) {
+      const ph = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(`SELECT id, pos_prompt FROM images WHERE id IN (${ph})`)
+        .all(...chunk) as Array<{ id: number; pos_prompt: string | null }>;
+      for (const r of rows) out.push({ id: r.id, prompt: r.pos_prompt });
+    }
+    return out;
+  }
+
+  /**
+   * 配方比对的数据行(文件名/目录/宽高/seed/提示词/LoRA),顺序与传入 ids 一致。
+   * 只取需要的列 —— 比对一次可能上百行,不需要 meta_json / raw_json(单块能上兆)。
+   */
+  getCompareBasics(ids: number[]): CompareBasic[] {
+    const uniq = uniqueIds(ids);
+    if (uniq.length === 0) return [];
+    const rowsById = new Map<number, Omit<CompareBasic, 'loras'>>();
+    const lorasById = new Map<number, Array<{ name: string; strength: number | null }>>();
+    for (const chunk of chunkIds(uniq)) {
+      const ph = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT id, file_name, rel_dir, width, height, seed, pos_prompt
+           FROM images WHERE id IN (${ph})`
+        )
+        .all(...chunk) as Array<{
+        id: number;
+        file_name: string;
+        rel_dir: string;
+        width: number | null;
+        height: number | null;
+        seed: number | null;
+        pos_prompt: string | null;
+      }>;
+      for (const r of rows) {
+        rowsById.set(r.id, {
+          id: r.id,
+          fileName: r.file_name,
+          relDir: r.rel_dir,
+          width: r.width,
+          height: r.height,
+          seed: r.seed,
+          prompt: r.pos_prompt,
+        });
+      }
+      const loras = this.db
+        .prepare(`SELECT image_id, name, strength FROM lora_refs WHERE image_id IN (${ph})`)
+        .all(...chunk) as Array<{ image_id: number; name: string; strength: number | null }>;
+      for (const l of loras) {
+        const list = lorasById.get(l.image_id);
+        if (list) list.push({ name: l.name, strength: l.strength });
+        else lorasById.set(l.image_id, [{ name: l.name, strength: l.strength }]);
+      }
+    }
+    return uniq
+      .map((id) => {
+        const base = rowsById.get(id);
+        return base ? { ...base, loras: lorasById.get(id) ?? [] } : null;
+      })
+      .filter((x): x is CompareBasic => x !== null);
+  }
+
   /**
    * 结果集内的邻居(用于详情页左右翻页)。
    *
@@ -1359,6 +1480,27 @@ export class AssetDb {
 /** 转义 LIKE 模式里的元字符。与 SQL 里的 ESCAPE '!' 配对使用。 */
 function escapeLike(s: string): string {
   return s.replace(/[!%_]/g, (c) => '!' + c);
+}
+
+/** 去重 + 只留正整数 id(IPC 入参不可信) */
+function uniqueIds(ids: number[]): number[] {
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const raw of Array.isArray(ids) ? ids : []) {
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0 || seen.has(n)) continue;
+    seen.add(n);
+    out.push(n);
+  }
+  return out;
+}
+
+/** 按 500 一批切分(SQLite 的绑定变量数有上限,IN (...) 不能无限铺开) */
+const ID_CHUNK = 500;
+function chunkIds(ids: number[]): number[][] {
+  const out: number[][] = [];
+  for (let i = 0; i < ids.length; i += ID_CHUNK) out.push(ids.slice(i, i + ID_CHUNK));
+  return out;
 }
 
 /**
