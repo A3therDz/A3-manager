@@ -119,18 +119,16 @@ function readAllRecipes(): RecipeRecord[] {
 }
 
 /**
- * 配方里参与匹配的 LoRA(非 exclude、名字规范化后非空),展开成 db 层 recipeLoras 的形状。
- * 权重不是有限数时传 null —— 与 matchRecipes 一致:只按名字比。
+ * 配方里参与匹配的 LoRA 名字(非 exclude、规范化后非空)。
+ * 匹配只看名字不看权重(见 shared/recipes.ts 的 matchRecipes),所以这里只交出规范化名字。
  */
-function recipeMatchLoras(rec: RecipeRecord): Array<{ name: string; strength: number | null }> {
+function recipeMatchNames(rec: RecipeRecord): string[] {
   if (!Array.isArray(rec.loras)) return [];
-  const out: Array<{ name: string; strength: number | null }> = [];
+  const out: string[] = [];
   for (const l of rec.loras) {
     if (!l || l.exclude === true) continue;
-    const name = typeof l.file_name === 'string' ? l.file_name : '';
-    if (normalizeLoraName(name) === '') continue;
-    const s = Number(l.strength);
-    out.push({ name, strength: Number.isFinite(s) ? s : null });
+    const base = normalizeLoraName(typeof l.file_name === 'string' ? l.file_name : '');
+    if (base !== '') out.push(base);
   }
   return out;
 }
@@ -1071,15 +1069,15 @@ function registerIpc(): void {
     const t0 = Date.now();
     // 全文检索先拿到 id 白名单,再交给结构化筛选
     const query = { ...q };
-    // 按 LoRA 配方筛选:在主进程把配方文件展开成 recipeLoras(db 层不碰文件系统);
+    // 按 LoRA 配方筛选:在主进程把配方文件展开成配方 LoRA 名字(db 层不碰文件系统);
     // 配方不存在 / 没有有效 LoRA → recipeNoMatch(空结果,不是"不过滤")
     const recipeId = typeof query.recipeId === 'string' ? query.recipeId.trim() : '';
     delete query.recipeId;
     if (recipeId) {
       const rec = readRecipeFile(recipeId);
-      const loras = rec ? recipeMatchLoras(rec) : [];
-      if (loras.length === 0) query.recipeNoMatch = true;
-      else query.recipeLoras = loras;
+      const names = rec ? recipeMatchNames(rec) : [];
+      if (names.length === 0) query.recipeNoMatch = true;
+      else query.recipeLoraNames = names;
     }
     const text = typeof query.q === 'string' ? query.q.trim() : '';
     if (text) {
@@ -1531,8 +1529,8 @@ function registerIpc(): void {
     }
     const t0 = Date.now();
     const stats: RecipeStat[] = readAllRecipes().map((rec) => {
-      const loras = recipeMatchLoras(rec);
-      const count = loras.length === 0 ? 0 : db.queryImages({ recipeLoras: loras, limit: 1 }).total;
+      const names = recipeMatchNames(rec);
+      const count = names.length === 0 ? 0 : db.queryImages({ recipeLoraNames: names, limit: 1 }).total;
       return { id: rec.id, title: rec.title, count };
     });
     console.log(`[recipes] 配方命中统计:${stats.length} 个配方,${Date.now() - t0}ms`);

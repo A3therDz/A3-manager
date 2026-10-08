@@ -747,6 +747,8 @@ style.textContent = `
     white-space: nowrap; font-weight: 600; }
   .cam-recipe-count { flex-shrink: 0; color: var(--accent); font-size: 10.5px;
     background: var(--accent-bg); border-radius: 999px; padding: 0 7px; line-height: 16px; }
+  .cam-recipe-drift { flex-shrink: 0; color: var(--warn); font-size: 10.5px;
+    border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; line-height: 14px; }
   .cam-recipe-caret { flex-shrink: 0; color: var(--muted); font-size: 10px; }
   .cam-recipe-body { padding: 4px 10px 7px 42px; border-top: 1px solid var(--border);
     animation: cam-fade var(--dur-2) var(--ease); }

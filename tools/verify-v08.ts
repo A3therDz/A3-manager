@@ -112,11 +112,13 @@ const L = (name: string, strength: number | null) => ({ name, strength });
 const R = (id: string, title: string, loras: { file_name: string; strength: number; exclude?: boolean }[]): RecipeRecord =>
   ({ id, title, file_path: '', base_model: '', favorite: false, loras } as RecipeRecord);
 
-// B1) 名字规范化
+// B1) 名字规范化(只剥模型扩展名,不剥名字里的点名/版本号)
 const normCases: [string, string][] = [
   ['画风类/velnari_fantasy_impressions_krea2', 'velnari_fantasy_impressions_krea2'],
   ['画风类\\sub\\Krea_2_in_real_v2.safetensors', 'krea_2_in_real_v2'],
   ['  m87_lora_v1  ', 'm87_lora_v1'],
+  ['(Krea 2) Vision Vanguard 24 V2026.1', '(krea 2) vision vanguard 24 v2026.1'],
+  ['krea2/style/(Krea 2) Vision Vanguard 24 V2026.1.safetensors', '(krea 2) vision vanguard 24 v2026.1'],
 ];
 for (const [input, expected] of normCases) {
   if (normalizeLoraName(input) === expected) good(`normalize(${JSON.stringify(input)})`);
@@ -153,33 +155,56 @@ else bad(`unmatched 期望 [3],得到 ${JSON.stringify(m.unmatched)}`);
 if (!matchedIdx.has(0) || !matchedIdx.has(1) || !matchedIdx.has(2)) bad('配方应吸收各自对应的 LoRA');
 else good('每个配方吸收的 LoRA 索引正确');
 
-// B4) 强度容差 ±0.005
-const tol = matchRecipes([L('a_lora', 0.575), L('b_lora', 0.6)], [R('t', '容差', [{ file_name: 'a_lora', strength: 0.57 }])]);
-if (tol.matches.length === 1) good('强度差 0.005 内判为命中');
-else bad('强度容差 ±0.005 未生效');
-const tolOut = matchRecipes([L('a_lora', 0.62)], [R('t2', '超差', [{ file_name: 'a_lora', strength: 0.6 }])]);
-if (tolOut.matches.length === 0) good('强度差超过容差不命中');
-else bad('强度差 0.02 不应命中');
+// B4) 权重不参与命中,只作为提示(调过权重不该让整组配方失效)
+const diffW = matchRecipes([L('a_lora', 0.2)], [R('w', '权重被调过', [{ file_name: 'a_lora', strength: 0.8 }])]);
+if (diffW.matches.length === 1) good('权重和配方记录不同(0.2 vs 0.8)仍按名字命中');
+else bad('权重不同不应导致漏掉配方');
+const wd = diffW.matches[0]?.weightDrift ?? 0;
+if (Math.abs(wd - 0.6) < 1e-9) good(`命中的权重偏差被记下来(weightDrift=${wd.toFixed(2)})`);
+else bad(`weightDrift 期望 0.6,得到 ${wd}`);
+const pairW = diffW.matches[0]?.pairs?.[0];
+if (pairW && pairW.imageStrength === 0.2 && pairW.recipeLora.strength === 0.8)
+  good('配对里同时带配方权重与图里实际权重(供界面显示「实际 x」)');
+else bad('配对缺少图里实际权重');
 
-// B5) 重叠配方贪心:大配方优先,一个 LoRA 只归一个配方
-const overlap = matchRecipes(
-  [L('shared_lora', 0.5), L('only_big', 0.7)],
+// B5) 长短配方同时可能命中:长配方优先(权重差异不该让短配方顶上来)
+const longer = matchRecipes(
+  [L('base_a', 0.7), L('base_b', 0.8), L('extra_d', 0.2)],
   [
-    R('small', '小配方', [{ file_name: 'shared_lora', strength: 0.5 }]),
-    R('big', '大配方', [
-      { file_name: 'shared_lora', strength: 0.5 },
-      { file_name: 'only_big', strength: 0.7 },
+    R('short', '短配方', [
+      { file_name: 'base_a', strength: 0.7 },
+      { file_name: 'base_b', strength: 0.8 },
+    ]),
+    R('long', '长配方', [
+      { file_name: 'base_a', strength: 0.7 },
+      { file_name: 'base_b', strength: 0.8 },
+      { file_name: 'extra_d', strength: 0.8 },
     ]),
   ]
 );
-const ids = overlap.matches.map((x) => x.recipe.id);
-if (ids.length === 1 && ids[0] === 'big') good('重叠时大配方优先整组命中,小配方不拆散');
-else bad(`贪心分配期望只命中 big,得到 ${ids.join(',') || '(空)'}`);
+const longerIds = longer.matches.map((x) => x.recipe.id);
+if (longerIds.length === 1 && longerIds[0] === 'long')
+  good('长配方整组命中后,它的子集(短配方)不再重复命中,也没有散落的 LoRA');
+else bad(`期望只命中 long,得到 ${longerIds.join(',') || '(空)'};unmatched=${JSON.stringify(longer.unmatched)}`);
 
-// B6) 图侧 null 权重只按名字比
-const nullW = matchRecipes([L('a_lora', null)], [R('n', 'null权重', [{ file_name: 'a_lora', strength: 1 }])]);
-if (nullW.matches.length === 1) good('图侧权重为 null 时只按名字匹配');
-else bad('图侧 null 权重应按名字匹配命中');
+// B6) 条数相同才用权重接近度定胜负(长配方优先之后的第一顺位)
+const tie = matchRecipes(
+  [L('x_lora', 0.3)],
+  [
+    R('far', '差得远', [{ file_name: 'x_lora', strength: 0.9 }]),
+    R('near', '更接近', [{ file_name: 'x_lora', strength: 0.3 }]),
+  ]
+);
+if (tie.matches.length === 1 && tie.matches[0].recipe.id === 'near') good('条数相同时权重更接近的配方优先');
+else bad(`条数相同时期望命中 near,得到 ${tie.matches.map((x) => x.recipe.id).join(',') || '(空)'}`);
+
+// B7) 图中 LoRA 带子目录 / 权重为 null
+const subdir = matchRecipes(
+  [L('画风类/only_here', null)],
+  [R('s', '子目录', [{ file_name: 'only_here.safetensors', strength: 1 }])]
+);
+if (subdir.matches.length === 1) good('图侧带子目录、配方侧带扩展名,规范化后仍命中(权重 null 只按名字)');
+else bad('子目录/扩展名/权重缺失的组合应命中');
 
 // ---------------------------------------------------------------- C. 按配方筛选(行为)
 
@@ -229,44 +254,40 @@ console.log('\n=== C) 按配方筛选(行为) ===');
   addImg([{ name: 'sub/dir/style_a', strength: 0.6 }, { name: 'style_b', strength: 0.4 }]);
   addImg([{ name: 'style_a', strength: null }, { name: 'style_b', strength: null }]);
 
-  const RECIPE2 = [{ name: 'style_a', strength: 0.6 }, { name: 'style_b', strength: 0.4 }];
+  const RECIPE2 = ['style_a', 'style_b'];
 
-  // C1) 子集语义:两条都齐才命中(命中 img1/4/5/6,img2 只有一条、img3 超差,都不算)
-  const c1 = rdb.queryImages({ recipeLoras: RECIPE2, limit: 50 });
+  // C1) 子集语义:两条都齐才命中(只看名字:img1/4/5/6 命中,img2/3 只有一条,不算)
+  const c1 = rdb.queryImages({ recipeLoraNames: RECIPE2, limit: 50 });
   if (c1.total === 4 && c1.ids.includes(img1)) good('子集匹配:配方两条 LoRA 都齐的图才命中');
   else bad(`子集匹配期望 total=4,得到 ${c1.total} (ids=${c1.ids.join(',')})`);
-  const c1b = rdb.queryImages({ recipeLoras: RECIPE2, starredOnly: false, limit: 50 });
-  if (!c1b.ids.includes(2) && !c1b.ids.includes(3)) good('只有其中一条 / 权重超差的图不命中');
-  else bad(`缺一条或超差的图不应命中,ids=${c1b.ids.join(',')}`);
+  const c1b = rdb.queryImages({ recipeLoraNames: RECIPE2, limit: 50 });
+  if (!c1b.ids.includes(2) && !c1b.ids.includes(3)) good('只有其中一条的图不命中');
+  else bad(`缺一条的图不应命中,ids=${c1b.ids.join(',')}`);
 
-  // C2) 权重容差:差 0.005 命中(上面的 img4 已在 c1 里),差 0.02 不命中
-  const c2 = rdb.queryImages({ recipeLoras: [{ name: 'style_a', strength: 0.6 }], limit: 50 });
-  if (c2.ids.includes(4) && !c2.ids.includes(3)) good('权重差 0.005 内命中、0.02 不命中');
-  else bad(`权重容差断言失败,ids=${c2.ids.join(',')}`);
+  // C2) 权重不参与命中:调过权重(0.62 / 0.605)的图照样命中
+  const c2 = rdb.queryImages({ recipeLoraNames: ['style_a'], limit: 50 });
+  if (c2.total === 6) good('权重与配方记录不同(0.62 / 0.605)仍然命中 —— 匹配只看名字');
+  else bad(`权重不该参与命中,期望 total=6,得到 ${c2.total}`);
 
-  // C3) 名字规范化:图带子目录 ↔ 配方写裸名,两个方向都命中
+  // C3) 名字规范化:图带子目录 ↔ 配方写裸名/带扩展名,两个方向都命中
   if (c1.ids.includes(1) && c1.ids.includes(5)) good('图侧 LoRA 带子目录(不同子目录)也能命中裸名配方');
   else bad(`图侧子目录规范化失败,ids=${c1.ids.join(',')}`);
-  const c3 = rdb.queryImages({ recipeLoras: [{ name: '画风类/style_a', strength: 0.6 }], limit: 50 });
-  if (c3.ids.includes(2)) good('配方侧带子目录、图侧是裸名也能命中');
-  else bad(`配方侧子目录规范化失败,ids=${c3.ids.join(',')}`);
+  const c3 = rdb.queryImages({ recipeLoraNames: ['画风类/style_a.safetensors'], limit: 50 });
+  if (c3.total === 6) good('配方侧带子目录+扩展名、图侧是裸名也能命中');
+  else bad(`配方侧规范化失败,期望 total=6,得到 ${c3.total}`);
 
-  // C4) 图侧权重为 null → 只按名字命中
-  if (c1.ids.includes(6)) good('图中 LoRA 权重为 null 时只按名字命中');
+  // C4) 图侧权重为 null → 照常按名字命中
+  if (c1.ids.includes(6)) good('图中 LoRA 权重为 null 时按名字命中');
   else bad('图侧 null 权重应按名字命中');
-  // 反过来:配方侧权重缺失(null)→ 也只按名字比,任何权重都算(含超差的 img3)
-  const c4 = rdb.queryImages({ recipeLoras: [{ name: 'style_a', strength: null }], limit: 50 });
-  if (c4.total === 6) good('配方侧权重为 null 时只按名字匹配(全部 6 张)');
-  else bad(`配方侧 null 权重期望 total=6,得到 ${c4.total}`);
 
   // C5) recipeNoMatch(主进程在"配方不存在/无有效 LoRA"时传)→ 空结果
   const c5 = rdb.queryImages({ recipeNoMatch: true, limit: 50 });
   if (c5.total === 0 && c5.ids.length === 0) good('recipeNoMatch → total 为 0(不是"不过滤")');
   else bad(`recipeNoMatch 期望 total=0,得到 ${c5.total}`);
 
-  // C6) 与其它筛选组合:recipeLoras + starredOnly 同时生效
+  // C6) 与其它筛选组合:recipeLoraNames + starredOnly 同时生效
   rdb.setStarred(img1, true);
-  const c6 = rdb.queryImages({ recipeLoras: RECIPE2, starredOnly: true, limit: 50 });
+  const c6 = rdb.queryImages({ recipeLoraNames: RECIPE2, starredOnly: true, limit: 50 });
   if (c6.total === 1 && c6.ids[0] === img1) good('配方筛选与 starredOnly 叠加生效(只剩已收藏那张)');
   else bad(`组合筛选期望只有 img1,得到 total=${c6.total} ids=${c6.ids.join(',')}`);
 

@@ -22,7 +22,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CategoryNode, DetailTarget, ImageDetail, LoraEntry, PromptBlock, RecipeRecord } from '@shared/types';
-import { matchRecipes } from '@shared/recipes';
+import { matchRecipes, STRENGTH_TOLERANCE, type RecipeLoraPair } from '@shared/recipes';
 import { errMsg, fileUrl, thumbUrl } from '../api';
 import { useDelayedClose } from '../useDelayedClose';
 import { CategoryPicker } from './CategoryPicker';
@@ -129,14 +129,25 @@ function Section({ title, extra, children }: { title: string; extra?: React.Reac
 /** 命中配方的 LoRA 收成一条配方卡:封面 + 配方名,点击展开配方内容 */
 function RecipeLoraBar({
   recipe,
+  pairs,
   open,
   onToggle,
 }: {
   recipe: RecipeRecord;
+  /** 配方每条 LoRA 与图里对应项的配对(含图里实际权重) */
+  pairs: RecipeLoraPair[];
   open: boolean;
   onToggle: () => void;
 }) {
-  const items = (Array.isArray(recipe.loras) ? recipe.loras : []).filter((l) => l && l.exclude !== true);
+  const items = pairs.length
+    ? pairs
+    : (Array.isArray(recipe.loras) ? recipe.loras : [])
+        .filter((l) => l && l.exclude !== true)
+        .map((l) => ({ recipeLora: l, imageIndex: -1, imageStrength: null, strengthDiff: null }));
+  /** 图里实际权重和配方记录不一致的条数(>0 时在配方条上打个标记) */
+  const driftCount = items.filter(
+    (p) => p.strengthDiff !== null && p.strengthDiff > STRENGTH_TOLERANCE
+  ).length;
   return (
     <div className="cam-recipe-bar">
       <button
@@ -149,13 +160,21 @@ function RecipeLoraBar({
         <RecipeCover id={recipe.id} size={26} />
         <span className="cam-recipe-name">{recipe.title}</span>
         <span className="cam-recipe-count">{items.length} 个 LoRA</span>
+        {driftCount > 0 ? (
+          <span
+            className="cam-recipe-drift"
+            title={`有 ${driftCount} 条的权重与配方记录不同(展开可看实际权重)`}
+          >
+            权重≠
+          </span>
+        ) : null}
         <span className="cam-recipe-caret">{open ? '▾' : '▸'}</span>
       </button>
       {open ? (
         <div className="cam-recipe-body">
-          {items.map((l, i) => (
+          {items.map((p, i) => (
             <div
-              key={`${l.file_name}-${i}`}
+              key={`${p.recipeLora.file_name}-${i}`}
               style={{
                 display: 'flex',
                 justifyContent: 'space-between',
@@ -166,8 +185,15 @@ function RecipeLoraBar({
                 borderBottom: '1px solid var(--panel2)',
               }}
             >
-              <span style={{ wordBreak: 'break-all' }}>{l.file_name}</span>
-              <span style={{ color: 'var(--accent)', flexShrink: 0 }}>{l.strength}</span>
+              <span style={{ wordBreak: 'break-all' }}>{p.recipeLora.file_name}</span>
+              <span style={{ color: 'var(--accent)', flexShrink: 0 }}>
+                {p.recipeLora.strength}
+                {p.strengthDiff !== null && p.strengthDiff > STRENGTH_TOLERANCE ? (
+                  <span style={{ color: 'var(--warn)', marginLeft: 6 }}>
+                    (实际 {p.imageStrength})
+                  </span>
+                ) : null}
+              </span>
             </div>
           ))}
         </div>
@@ -513,10 +539,11 @@ export function DetailPanel({
           ) : (
             <>
               {/* 命中配方的 LoRA 收成配方卡(可展开);没被任何配方吸收的照常逐个列出 */}
-              {recipeMatch.matches.map(({ recipe }) => (
+              {recipeMatch.matches.map(({ recipe, pairs }) => (
                 <RecipeLoraBar
                   key={recipe.id}
                   recipe={recipe}
+                  pairs={pairs}
                   open={expandedRecipes.has(recipe.id)}
                   onToggle={() => toggleRecipeExpanded(recipe.id)}
                 />

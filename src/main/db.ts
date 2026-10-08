@@ -15,7 +15,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
-import { normalizeLoraName, STRENGTH_TOLERANCE } from '../shared/recipes.ts';
+import { normalizeLoraName } from '../shared/recipes.ts';
 
 // ---------------------------------------------------------------- 类型
 
@@ -672,28 +672,22 @@ export class AssetDb {
     /**
      * 按 LoRA 配方筛选(v0.8,内部字段,由主进程把 recipeId 展开后传入,渲染层不直接传)。
      * 子集语义(与 shared/recipes.ts 的 matchRecipes 同口径):
-     * 每条非 exclude 的 LoRA 一个 EXISTS,全部满足才算命中;
-     * 名字两边都过 cam_lora_base 规范化;图侧或配方侧权重缺失(null)时只按名字比。
+     * 每条非 exclude 的 LoRA 一个 EXISTS,全部满足才算命中;名字两边都过 cam_lora_base 规范化。
+     * **只看名字,不看权重** —— 出图时调过权重不该让整组配方失效(见 matchRecipes 的说明)。
      */
     if (q.recipeNoMatch === true) {
       // 配方不存在 / 无有效 LoRA -> 空结果,而不是当成"不过滤"(与"分类不存在"的先例一致)
       parts.push('1 = 0');
     }
-    const recipeLoras = q.recipeLoras as Array<{ name: string; strength: number | null }> | undefined;
-    if (Array.isArray(recipeLoras)) {
-      for (const rl of recipeLoras) {
-        if (!rl || typeof rl.name !== 'string') continue;
-        const base = normalizeLoraName(rl.name);
+    const recipeLoraNames = q.recipeLoraNames as string[] | undefined;
+    if (Array.isArray(recipeLoraNames)) {
+      for (const raw of recipeLoraNames) {
+        if (typeof raw !== 'string') continue;
+        const base = normalizeLoraName(raw);
         if (!base) continue;
-        const rs = typeof rl.strength === 'number' && Number.isFinite(rl.strength) ? rl.strength : null;
         push(
-          `EXISTS (SELECT 1 FROM lora_refs lr WHERE lr.image_id = i.id
-                   AND cam_lora_base(lr.name) = ?
-                   AND (lr.strength IS NULL OR ? IS NULL OR abs(lr.strength - ?) <= ?))`,
-          base,
-          rs,
-          rs,
-          STRENGTH_TOLERANCE + 1e-9
+          `EXISTS (SELECT 1 FROM lora_refs lr WHERE lr.image_id = i.id AND cam_lora_base(lr.name) = ?)`,
+          base
         );
       }
     }
