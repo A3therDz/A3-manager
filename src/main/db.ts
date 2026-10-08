@@ -15,6 +15,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
+import { normalizeLoraName, STRENGTH_TOLERANCE } from '../shared/recipes.ts';
 
 // ---------------------------------------------------------------- 类型
 
@@ -254,6 +255,15 @@ export class AssetDb {
   constructor(file: string) {
     this.file = file;
     this.db = new DatabaseSync(file);
+    /**
+     * 自定义 SQL 函数:LoRA 名规范化(去子目录/扩展名、小写)。
+     * 实现就是 shared/recipes.ts 的 normalizeLoraName —— 匹配口径只有那一份真源,
+     * "按配方筛选"与详情面板的 matchRecipes 才永远一致。
+     * deterministic 让 SQLite 知道同一输入必得同一输出(可以放心做查询优化)。
+     */
+    this.db.function('cam_lora_base', { deterministic: true }, (name: unknown) =>
+      normalizeLoraName(String(name ?? ''))
+    );
     this.db.exec(SCHEMA);
     this.#migrateContentlessFts();
   }
@@ -656,6 +666,35 @@ export class AssetDb {
                    WHERE ci.image_id = i.id AND ci.category_id IN (${catIds.map(() => '?').join(',')}))`
         );
         params.push(...catIds);
+      }
+    }
+
+    /**
+     * 按 LoRA 配方筛选(v0.8,内部字段,由主进程把 recipeId 展开后传入,渲染层不直接传)。
+     * 子集语义(与 shared/recipes.ts 的 matchRecipes 同口径):
+     * 每条非 exclude 的 LoRA 一个 EXISTS,全部满足才算命中;
+     * 名字两边都过 cam_lora_base 规范化;图侧或配方侧权重缺失(null)时只按名字比。
+     */
+    if (q.recipeNoMatch === true) {
+      // 配方不存在 / 无有效 LoRA -> 空结果,而不是当成"不过滤"(与"分类不存在"的先例一致)
+      parts.push('1 = 0');
+    }
+    const recipeLoras = q.recipeLoras as Array<{ name: string; strength: number | null }> | undefined;
+    if (Array.isArray(recipeLoras)) {
+      for (const rl of recipeLoras) {
+        if (!rl || typeof rl.name !== 'string') continue;
+        const base = normalizeLoraName(rl.name);
+        if (!base) continue;
+        const rs = typeof rl.strength === 'number' && Number.isFinite(rl.strength) ? rl.strength : null;
+        push(
+          `EXISTS (SELECT 1 FROM lora_refs lr WHERE lr.image_id = i.id
+                   AND cam_lora_base(lr.name) = ?
+                   AND (lr.strength IS NULL OR ? IS NULL OR abs(lr.strength - ?) <= ?))`,
+          base,
+          rs,
+          rs,
+          STRENGTH_TOLERANCE + 1e-9
+        );
       }
     }
 

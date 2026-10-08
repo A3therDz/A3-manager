@@ -8,12 +8,15 @@
  *      配方功能(存储/协议/匹配/管理 UI/详情分组)各自的关键代码点必须在文件里;
  *   B. 行为验证:src/shared/recipes.ts 的纯匹配逻辑(规范化 / 指纹 / 子集匹配 / 贪心分配)。
  *      不需要数据库与图库。
+ *   C. 行为验证(内存库):按配方筛选 —— recipeLoras 子集匹配、权重容差、
+ *      子目录规范化、null 权重、recipeNoMatch、与 starredOnly 组合。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeLoraName, fingerprintOf, matchRecipes, type RecipeRecord } from '../src/shared/recipes.ts';
+import { AssetDb } from '../src/main/db.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT = path.resolve(__dirname, '..');
@@ -177,6 +180,98 @@ else bad(`贪心分配期望只命中 big,得到 ${ids.join(',') || '(空)'}`);
 const nullW = matchRecipes([L('a_lora', null)], [R('n', 'null权重', [{ file_name: 'a_lora', strength: 1 }])]);
 if (nullW.matches.length === 1) good('图侧权重为 null 时只按名字匹配');
 else bad('图侧 null 权重应按名字匹配命中');
+
+// ---------------------------------------------------------------- C. 按配方筛选(行为)
+
+console.log('\n=== C) 按配方筛选(行为) ===');
+{
+  const rdb = new AssetDb(':memory:');
+  const rootId = rdb.addRoot('C:/recipes-test', 'recipes-test');
+  let seq = 0;
+  /** 造一张图;loras 直接进 lora_refs 表 */
+  const addImg = (loras: Array<{ name: string; strength: number | null }>): number => {
+    seq++;
+    return rdb.upsertImage({
+      rootId,
+      absPath: `C:/recipes-test/img${seq}.png`,
+      relPath: `img${seq}.png`,
+      relDir: '',
+      fileName: `img${seq}.png`,
+      fileSize: 1000 + seq,
+      fileMtime: 1700000000000 + seq,
+      width: 1024,
+      height: 1024,
+      source: 'comfyui',
+      modelName: null,
+      samplerName: null,
+      scheduler: null,
+      steps: null,
+      cfg: null,
+      seed: null,
+      posPrompt: null,
+      negPrompt: null,
+      promptLen: 0,
+      loraCount: loras.length,
+      nodeCount: 0,
+      metaJson: '{}',
+      rawJson: null,
+      loras,
+      searchText: `img${seq}`,
+    }).id;
+  };
+
+  // img1:两条 lora 都在(图侧带子目录);img2:只有 style_a;img3:style_a 权重差 0.02;
+  // img4:style_a 权重差恰为 0.005;img5:图侧 style_a 带另一层子目录;img6:两条权重都是 null
+  const img1 = addImg([{ name: '画风类/style_a', strength: 0.6 }, { name: 'style_b', strength: 0.4 }]);
+  addImg([{ name: 'style_a', strength: 0.6 }]);
+  addImg([{ name: 'style_a', strength: 0.62 }]);
+  addImg([{ name: 'style_a', strength: 0.605 }, { name: 'style_b', strength: 0.4 }]);
+  addImg([{ name: 'sub/dir/style_a', strength: 0.6 }, { name: 'style_b', strength: 0.4 }]);
+  addImg([{ name: 'style_a', strength: null }, { name: 'style_b', strength: null }]);
+
+  const RECIPE2 = [{ name: 'style_a', strength: 0.6 }, { name: 'style_b', strength: 0.4 }];
+
+  // C1) 子集语义:两条都齐才命中(命中 img1/4/5/6,img2 只有一条、img3 超差,都不算)
+  const c1 = rdb.queryImages({ recipeLoras: RECIPE2, limit: 50 });
+  if (c1.total === 4 && c1.ids.includes(img1)) good('子集匹配:配方两条 LoRA 都齐的图才命中');
+  else bad(`子集匹配期望 total=4,得到 ${c1.total} (ids=${c1.ids.join(',')})`);
+  const c1b = rdb.queryImages({ recipeLoras: RECIPE2, starredOnly: false, limit: 50 });
+  if (!c1b.ids.includes(2) && !c1b.ids.includes(3)) good('只有其中一条 / 权重超差的图不命中');
+  else bad(`缺一条或超差的图不应命中,ids=${c1b.ids.join(',')}`);
+
+  // C2) 权重容差:差 0.005 命中(上面的 img4 已在 c1 里),差 0.02 不命中
+  const c2 = rdb.queryImages({ recipeLoras: [{ name: 'style_a', strength: 0.6 }], limit: 50 });
+  if (c2.ids.includes(4) && !c2.ids.includes(3)) good('权重差 0.005 内命中、0.02 不命中');
+  else bad(`权重容差断言失败,ids=${c2.ids.join(',')}`);
+
+  // C3) 名字规范化:图带子目录 ↔ 配方写裸名,两个方向都命中
+  if (c1.ids.includes(1) && c1.ids.includes(5)) good('图侧 LoRA 带子目录(不同子目录)也能命中裸名配方');
+  else bad(`图侧子目录规范化失败,ids=${c1.ids.join(',')}`);
+  const c3 = rdb.queryImages({ recipeLoras: [{ name: '画风类/style_a', strength: 0.6 }], limit: 50 });
+  if (c3.ids.includes(2)) good('配方侧带子目录、图侧是裸名也能命中');
+  else bad(`配方侧子目录规范化失败,ids=${c3.ids.join(',')}`);
+
+  // C4) 图侧权重为 null → 只按名字命中
+  if (c1.ids.includes(6)) good('图中 LoRA 权重为 null 时只按名字命中');
+  else bad('图侧 null 权重应按名字命中');
+  // 反过来:配方侧权重缺失(null)→ 也只按名字比,任何权重都算(含超差的 img3)
+  const c4 = rdb.queryImages({ recipeLoras: [{ name: 'style_a', strength: null }], limit: 50 });
+  if (c4.total === 6) good('配方侧权重为 null 时只按名字匹配(全部 6 张)');
+  else bad(`配方侧 null 权重期望 total=6,得到 ${c4.total}`);
+
+  // C5) recipeNoMatch(主进程在"配方不存在/无有效 LoRA"时传)→ 空结果
+  const c5 = rdb.queryImages({ recipeNoMatch: true, limit: 50 });
+  if (c5.total === 0 && c5.ids.length === 0) good('recipeNoMatch → total 为 0(不是"不过滤")');
+  else bad(`recipeNoMatch 期望 total=0,得到 ${c5.total}`);
+
+  // C6) 与其它筛选组合:recipeLoras + starredOnly 同时生效
+  rdb.setStarred(img1, true);
+  const c6 = rdb.queryImages({ recipeLoras: RECIPE2, starredOnly: true, limit: 50 });
+  if (c6.total === 1 && c6.ids[0] === img1) good('配方筛选与 starredOnly 叠加生效(只剩已收藏那张)');
+  else bad(`组合筛选期望只有 img1,得到 total=${c6.total} ids=${c6.ids.join(',')}`);
+
+  rdb.close();
+}
 
 console.log('\n' + (failures === 0 ? 'OVERALL: PASS' : `OVERALL: FAIL (${failures} 项)`));
 process.exit(failures === 0 ? 0 : 1);

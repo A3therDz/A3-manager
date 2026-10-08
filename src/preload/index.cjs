@@ -123,6 +123,8 @@ const api = {
   listRecipes: () => call('listRecipes'),
   saveRecipe: (recipe) => call('saveRecipe', recipe),
   deleteRecipe: (id) => call('deleteRecipe', id),
+  /** 每个配方命中的图片数(左侧「配方」小节的数量胶囊) */
+  getRecipeStats: () => call('getRecipeStats'),
   // 配方封面:纯前端拼接,不走 IPC(同 getThumbUrl)
   recipeCoverUrl: (id) => `cam-recipe://cover/${encodeURIComponent(id)}`,
 

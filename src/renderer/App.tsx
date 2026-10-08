@@ -11,9 +11,9 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CategoryNode, DetailTarget, DroppedInspection, FolderNode, ImageQuery, LibraryRoot, RecipeRecord, SortKey } from '@shared/types';
+import type { CategoryNode, DetailTarget, DroppedInspection, FolderNode, ImageQuery, LibraryRoot, RecipeRecord, RecipeStat, SortKey } from '@shared/types';
 import { errMsg, useCategories, useFolders, useImageDetail, useImages, useScanProgress, useStats } from './api';
-import { CategoryTree, FolderTree, FolderVisibilityTree } from './components/Trees';
+import { CategoryTree, FolderTree, FolderVisibilityTree, RecipeTree } from './components/Trees';
 import { ImageGrid } from './components/ImageGrid';
 import { DetailPanel } from './components/DetailPanel';
 import { CategoryPicker } from './components/CategoryPicker';
@@ -346,9 +346,10 @@ function catNameById(list: CategoryNode[], id: number): string | null {
   return null;
 }
 
-/** 标签标题:当前视图的一句话概括(文件夹/分类 + 搜索词 + 模型 + 收藏) */
-function tabTitle(q: ImageQuery, cats: CategoryNode[]): string {
+/** 标签标题:当前视图的一句话概括(配方/文件夹/分类 + 搜索词 + 模型 + 收藏) */
+function tabTitle(q: ImageQuery, cats: CategoryNode[], recipes: RecipeRecord[]): string {
   const parts: string[] = [];
+  if (q.recipeId) parts.push(recipes.find((r) => r.id === q.recipeId)?.title ?? '配方');
   if (q.categoryId !== undefined) parts.push(catNameById(cats, q.categoryId) ?? '分类');
   else if (q.relDir) parts.push(q.relDir.split(/[\\/]/).filter(Boolean).pop() ?? q.relDir);
   if (q.q && q.q.trim()) parts.push(`“${q.q.trim()}”`);
@@ -437,9 +438,15 @@ export function App() {
 
   // ---- LoRA 配方(v0.8):顶层加载一次,详情面板的分组显示与配方管理弹层共用
   const [recipes, setRecipes] = useState<RecipeRecord[]>([]);
+  /** 每个配方命中的图片数(左侧「配方」小节的数量胶囊) */
+  const [recipeStats, setRecipeStats] = useState<RecipeStat[]>([]);
+  const reloadRecipeStats = useCallback(() => {
+    window.api.getRecipeStats().then(setRecipeStats).catch(() => undefined);
+  }, []);
   const reloadRecipes = useCallback(() => {
     window.api.listRecipes().then(setRecipes).catch(() => undefined);
-  }, []);
+    reloadRecipeStats();
+  }, [reloadRecipeStats]);
   useEffect(() => {
     reloadRecipes();
   }, [reloadRecipes]);
@@ -1184,8 +1191,8 @@ export function App() {
   const scanning = progress && (progress.phase === 'parsing' || progress.phase === 'walking');
 
   // 扫描完成(手动扫描或 B2 自动入库)后原地刷新列表与统计:新图立刻出现,但不跳回顶部
-  const reloadersRef = useRef({ stats: stats.reload, folders: folders.reload, categories: categories.reload });
-  reloadersRef.current = { stats: stats.reload, folders: folders.reload, categories: categories.reload };
+  const reloadersRef = useRef({ stats: stats.reload, folders: folders.reload, categories: categories.reload, recipeStats: reloadRecipeStats });
+  reloadersRef.current = { stats: stats.reload, folders: folders.reload, categories: categories.reload, recipeStats: reloadRecipeStats };
   const lastScanDoneRef = useRef<number | null>(null);
   useEffect(() => {
     if (!progress || progress.phase !== 'done') return;
@@ -1203,6 +1210,8 @@ export function App() {
     reloadersRef.current.stats();
     reloadersRef.current.folders();
     reloadersRef.current.categories();
+    // 配方命中数也可能变了(主进程缓存已失效,重拉一次)
+    reloadersRef.current.recipeStats();
   }, [progress, refresh]);
 
   /** 根容器:文件拖放的监听目标 */
@@ -1813,7 +1822,7 @@ export function App() {
       >
         {tabs.map((t) => {
           const isActive = t.id === activeTabId;
-          const title = tabTitle(isActive ? query : t.query, catList);
+          const title = tabTitle(isActive ? query : t.query, catList, recipes);
           return (
             <div
               key={t.id}
@@ -1875,6 +1884,20 @@ export function App() {
             onChanged={refreshCategories}
             notify={notify}
             onDropImage={(categoryId, ids) => void addImagesToCategory(categoryId, ids)}
+          />
+          {/* 配方(v0.8):按"一组 LoRA 组合"筛选,与文件夹/分类筛选可叠加 */}
+          <RecipeTree
+            recipes={recipes}
+            stats={recipeStats}
+            activeId={query.recipeId ?? null}
+            onPick={(id) => {
+              setQuery((q) => ({ ...q, recipeId: id ?? undefined }));
+              // 结果集换了内容,回到列表顶部(与「收藏」开关的做法一致)
+              requestAnimationFrame(() => {
+                const el = document.getElementById('cam-scroll');
+                if (el) el.scrollTop = 0;
+              });
+            }}
           />
           {folders.error ? <div style={warn}>{errMsg(folders.error)}</div> : null}
           <FolderTree

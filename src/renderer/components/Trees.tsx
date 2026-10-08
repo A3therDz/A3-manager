@@ -9,9 +9,10 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CategoryNode, FolderNode } from '@shared/types';
+import type { CategoryNode, FolderNode, RecipeRecord, RecipeStat } from '@shared/types';
 import { errMsg } from '../api';
 import { endImageDrag, getImageDragIds, isImageDrag, readImageDragIds } from '../dnd';
+import { RecipeCover } from './RecipeManager';
 
 /** 文件夹树只需要文件夹相关字段 */
 interface FolderTreeProps {
@@ -624,6 +625,71 @@ export function CategoryTree({ categories, activeCat, onPickCat, onChanged, noti
         <div style={{ color: 'var(--muted)', fontSize: 11, padding: '2px 12px 6px' }}>
           还没有分类,点右上「+ 新建」
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * 「配方」小节(v0.8):点一行 = 当前标签页按该配方筛选(子集匹配);
+ * 再点一次选中的配方或点「全部配方」= 取消该筛选。
+ * 与文件夹/分类筛选可以叠加(配方是"这组 LoRA 组合",不限定位置)。
+ */
+export function RecipeTree({ recipes, stats, activeId, onPick }: {
+  recipes: RecipeRecord[];
+  stats: RecipeStat[];
+  activeId: string | null;
+  onPick: (id: string | null) => void;
+}) {
+  // 小节整体折叠:配方可能有一二十条,不需要时收起来
+  const [open, setOpen] = useState(true);
+  const countOf = useMemo(() => new Map(stats.map((s) => [s.id, s.count])), [stats]);
+  // 与「全部分类」的口径一致:直接相加(一张图命中多个配方时会重复计,只是概数)
+  const totalAll = useMemo(
+    () => recipes.reduce((s, r) => s + (countOf.get(r.id) ?? 0), 0),
+    [recipes, countOf]
+  );
+
+  return (
+    <div>
+      <div
+        style={{ ...headerStyle, display: 'flex', alignItems: 'center', cursor: 'pointer', userSelect: 'none' }}
+        title={open ? '折叠' : '展开'}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="cam-tree-caret" aria-hidden="true" style={{ width: 12 }}>
+          {open ? '▾' : '▸'}
+        </span>
+        配方
+      </div>
+      {open ? (
+        <>
+          <Row
+            label="全部配方"
+            count={totalAll}
+            depth={0}
+            active={activeId === null}
+            title="清除配方筛选,显示全部图片"
+            onClick={() => onPick(null)}
+          />
+          {recipes.map((r) => (
+            <Row
+              key={r.id}
+              label={r.title}
+              count={countOf.get(r.id) ?? 0}
+              depth={0}
+              active={activeId === r.id}
+              icon={<RecipeCover id={r.id} size={18} />}
+              title={`${r.title}\n单击按该配方筛选(子集匹配,可再叠加文件夹/分类等筛选);再点一次取消`}
+              onClick={() => onPick(activeId === r.id ? null : r.id)}
+            />
+          ))}
+          {recipes.length === 0 ? (
+            <div style={{ color: 'var(--muted)', fontSize: 11, padding: '2px 12px 6px' }}>
+              还没有配方,在图片详情的 LoRA 区点「存为配方」
+            </div>
+          ) : null}
+        </>
       ) : null}
     </div>
   );

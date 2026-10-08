@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CategoryNode, FolderNode, ImageQuery, ImageQueryResult,
   ImageRecord, ImageDetail, LibraryStats, ScanProgress, ApiSurface, AppSettings,
+  RecipeStat,
 } from '@shared/types';
 import type { RecipeRecord } from '@shared/recipes';
 
@@ -167,6 +168,7 @@ function createHttpApi(): ApiSurface {
     saveRecipe: (r) => Promise.resolve(r),
     deleteRecipe: () => Promise.resolve(),
     recipeCoverUrl: () => '',
+    getRecipeStats: () => Promise.resolve([] as RecipeStat[]),
 
     // 应用
     getAppInfo: () => desktopOnly('getAppInfo'),

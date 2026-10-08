@@ -22,7 +22,8 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { AssetDb } from './db.ts';
 import { scanLibrary, THUMB_DIR_NAME, META_VERSION, type ScanProgress } from './indexer.ts';
-import { fingerprintOf, type RecipeRecord } from '../shared/recipes.ts';
+import { fingerprintOf, normalizeLoraName, type RecipeRecord } from '../shared/recipes.ts';
+import type { RecipeStat } from '../shared/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const toolsRequire = createRequire(import.meta.url);
@@ -95,6 +96,43 @@ function readRecipeFile(id: string): RecipeRecord | null {
   } catch {
     return null;
   }
+}
+
+/** 全部配方;解析失败的文件被跳过(与 listRecipes handler 共用同一份实现) */
+function readAllRecipes(): RecipeRecord[] {
+  const out: RecipeRecord[] = [];
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(RECIPES_DIR).filter((n) => n.endsWith('.recipe.json'));
+  } catch {
+    return out; // 目录还没有 = 还没有配方
+  }
+  for (const n of names) {
+    try {
+      const rec = JSON.parse(fs.readFileSync(path.join(RECIPES_DIR, n), 'utf8')) as RecipeRecord;
+      if (rec && typeof rec.id === 'string' && typeof rec.title === 'string') out.push(rec);
+    } catch (e) {
+      console.warn('[recipes] 跳过无法解析的配方文件:', n, e instanceof Error ? e.message : e);
+    }
+  }
+  return out;
+}
+
+/**
+ * 配方里参与匹配的 LoRA(非 exclude、名字规范化后非空),展开成 db 层 recipeLoras 的形状。
+ * 权重不是有限数时传 null —— 与 matchRecipes 一致:只按名字比。
+ */
+function recipeMatchLoras(rec: RecipeRecord): Array<{ name: string; strength: number | null }> {
+  if (!Array.isArray(rec.loras)) return [];
+  const out: Array<{ name: string; strength: number | null }> = [];
+  for (const l of rec.loras) {
+    if (!l || l.exclude === true) continue;
+    const name = typeof l.file_name === 'string' ? l.file_name : '';
+    if (normalizeLoraName(name) === '') continue;
+    const s = Number(l.strength);
+    out.push({ name, strength: Number.isFinite(s) ? s : null });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- 设置
@@ -246,6 +284,35 @@ let scanAbort: AbortController | null = null;
 let lastProgress: ScanProgress | null = null;
 /** 关闭按钮是"收进托盘"还是"退出" */
 let quitting = false;
+
+/**
+ * 配方命中统计(getRecipeStats)的缓存。
+ * 失效条件:
+ *  1. 配方目录签名变化(文件名 + mtime —— 应用内保存/删除与外部工具改文件都能捕获);
+ *  2. 图库索引代际变化(扫描结束且本轮有新入库/清理 → indexGeneration 递增)。
+ */
+let recipeStatsCache: { sig: string; gen: number; stats: RecipeStat[] } | null = null;
+let indexGeneration = 0;
+
+/** 配方目录签名:文件名 + mtime。外部工具直接改 .recipe.json 也会让它变。 */
+function recipesDirSignature(): string {
+  try {
+    return fs
+      .readdirSync(RECIPES_DIR)
+      .filter((n) => n.endsWith('.recipe.json'))
+      .map((n) => {
+        try {
+          return `${n}:${fs.statSync(path.join(RECIPES_DIR, n)).mtimeMs}`;
+        } catch {
+          return n;
+        }
+      })
+      .sort()
+      .join('|');
+  } catch {
+    return '';
+  }
+}
 
 /** 拖入图片预览的最长边(只影响界面预览,原图不动) */
 const PREVIEW_MAX = 900;
@@ -702,6 +769,11 @@ async function runScan(opts: { rootIds?: number[]; force?: boolean; forceRescan?
         /* 记不下就下次再扫 */
       }
     }
+    // 本轮有新入库/清理 → 配方命中统计的缓存作废(代际 +1,getRecipeStats 会重算)
+    if (lastProgress && lastProgress.phase === 'done'
+        && ((lastProgress.indexed ?? 0) !== 0 || (lastProgress.removed ?? 0) !== 0)) {
+      indexGeneration++;
+    }
   }
 }
 
@@ -999,6 +1071,16 @@ function registerIpc(): void {
     const t0 = Date.now();
     // 全文检索先拿到 id 白名单,再交给结构化筛选
     const query = { ...q };
+    // 按 LoRA 配方筛选:在主进程把配方文件展开成 recipeLoras(db 层不碰文件系统);
+    // 配方不存在 / 没有有效 LoRA → recipeNoMatch(空结果,不是"不过滤")
+    const recipeId = typeof query.recipeId === 'string' ? query.recipeId.trim() : '';
+    delete query.recipeId;
+    if (recipeId) {
+      const rec = readRecipeFile(recipeId);
+      const loras = rec ? recipeMatchLoras(rec) : [];
+      if (loras.length === 0) query.recipeNoMatch = true;
+      else query.recipeLoras = loras;
+    }
     const text = typeof query.q === 'string' ? query.q.trim() : '';
     if (text) {
       const ids = db.searchIds(text, 20000);
@@ -1435,23 +1517,27 @@ function registerIpc(): void {
   handle('getThumbUrl', (id: number) => `cam-thumb://thumb/${id}`);
 
   // ---- LoRA 配方(v0.8):<userData>/recipes/<id>.recipe.json,一配方一文件
-  handle('listRecipes', () => {
-    const out: RecipeRecord[] = [];
-    let names: string[] = [];
-    try {
-      names = fs.readdirSync(RECIPES_DIR).filter((n) => n.endsWith('.recipe.json'));
-    } catch {
-      return out; // 目录还没有 = 还没有配方
+  handle('listRecipes', () => readAllRecipes());
+
+  /**
+   * 每个配方当前命中的图片数(左侧「配方」小节的数量胶囊)。
+   * 每个配方跑一次 COUNT 查询(子集匹配口径,与按配方筛选走同一WHERE);
+   * 结果带缓存:配方目录签名(文件名+mtime)或索引代际(扫描有实际变化)变了才重算。
+   */
+  handle('getRecipeStats', () => {
+    const sig = recipesDirSignature();
+    if (recipeStatsCache && recipeStatsCache.sig === sig && recipeStatsCache.gen === indexGeneration) {
+      return recipeStatsCache.stats;
     }
-    for (const n of names) {
-      try {
-        const rec = JSON.parse(fs.readFileSync(path.join(RECIPES_DIR, n), 'utf8')) as RecipeRecord;
-        if (rec && typeof rec.id === 'string' && typeof rec.title === 'string') out.push(rec);
-      } catch (e) {
-        console.warn('[recipes] 跳过无法解析的配方文件:', n, e instanceof Error ? e.message : e);
-      }
-    }
-    return out;
+    const t0 = Date.now();
+    const stats: RecipeStat[] = readAllRecipes().map((rec) => {
+      const loras = recipeMatchLoras(rec);
+      const count = loras.length === 0 ? 0 : db.queryImages({ recipeLoras: loras, limit: 1 }).total;
+      return { id: rec.id, title: rec.title, count };
+    });
+    console.log(`[recipes] 配方命中统计:${stats.length} 个配方,${Date.now() - t0}ms`);
+    recipeStatsCache = { sig, gen: indexGeneration, stats };
+    return stats;
   });
 
   handle('saveRecipe', (input: RecipeRecord) => {
@@ -1497,6 +1583,7 @@ function registerIpc(): void {
     }
 
     fs.writeFileSync(recipeFile(id), JSON.stringify(merged, null, 2));
+    recipeStatsCache = null; // 配方内容变了,命中统计立刻失效
     return merged;
   });
 
@@ -1508,6 +1595,7 @@ function registerIpc(): void {
       try { fs.rmSync(existing.file_path, { force: true }); } catch { /* 忽略 */ }
     }
     try { fs.rmSync(recipeFile(rid), { force: true }); } catch { /* 配方不存在就当删过了 */ }
+    recipeStatsCache = null;
   });
 
   // ---- 应用

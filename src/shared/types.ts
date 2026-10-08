@@ -204,6 +204,12 @@ export interface ImageQuery {
   categoryId?: number;
   /** 是否把子分类的图片也算进来(默认 true) */
   categoryRecursive?: boolean;
+  /**
+   * 按 LoRA 配方筛选(v0.8):配方 id(对应 <userData>/recipes/<id>.recipe.json)。
+   * 子集语义:配方的所有非 exclude LoRA 都在图里(名字规范化 + 权重 ±0.005)才算命中;
+   * 可与文件夹/分类/收藏等其它筛选叠加。配方不存在或无有效 LoRA 时结果为空(不是"不过滤")。
+   */
+  recipeId?: string;
   /** 时间区间(毫秒) */
   mtimeFrom?: number;
   mtimeTo?: number;
@@ -218,6 +224,13 @@ export interface ImageQueryResult {
   total: number;
   /** 本次查询耗时(毫秒),调试与性能验收用 */
   tookMs: number;
+}
+
+/** 左侧「配方」小节的一行统计:该配方当前命中多少张图(子集匹配口径,与详情面板 matchRecipes 一致) */
+export interface RecipeStat {
+  id: string;
+  title: string;
+  count: number;
 }
 
 /** 侧边栏"文件夹树"的一个节点。 */
@@ -545,6 +558,8 @@ export interface ApiSurface {
   deleteRecipe(id: string): Promise<void>;
   /** 配方封面图 URL(cam-recipe://cover/<id>,纯前端拼接不走 IPC);无封面时协议返回 404 */
   recipeCoverUrl(id: string): string;
+  /** 每个配方当前命中的图片数(子集匹配口径;主进程内有缓存,配方或索引变化后自动失效) */
+  getRecipeStats(): Promise<RecipeStat[]>;
 
   /**
    * 把图片**原文件**拖出到别的应用(ComfyUI / NovelAI 会直接读到 PNG 里的元数据)。
