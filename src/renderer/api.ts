@@ -15,6 +15,7 @@ import type {
   CategoryNode, FolderNode, ImageQuery, ImageQueryResult,
   ImageRecord, ImageDetail, LibraryStats, ScanProgress, ApiSurface, AppSettings,
 } from '@shared/types';
+import type { RecipeRecord } from '@shared/recipes';
 
 // ---------------------------------------------------------------- 浏览器调试兜底
 //
@@ -129,6 +130,8 @@ function createHttpApi(): ApiSurface {
     copyText: async (text) => {
       await navigator.clipboard.writeText(text);
     },
+    // 拖出原文件走 Electron 原生 startDrag,浏览器调试下没有这个东西;静默忽略即可
+    dragOutImages: () => {},
     deleteImage: () => desktopOnly('删除图片'),
     moveImage: () => desktopOnly('移动图片'),
     renameImage: () => desktopOnly('重命名图片'),
@@ -159,6 +162,12 @@ function createHttpApi(): ApiSurface {
     // 原图:浏览器调试本来就走 /api/file
     getFileUrl: (id) => `/api/file/${id}`,
 
+    // LoRA 配方:浏览器调试后端没有对应端点,保持契约形状的空实现
+    listRecipes: () => Promise.resolve([] as RecipeRecord[]),
+    saveRecipe: (r) => Promise.resolve(r),
+    deleteRecipe: () => Promise.resolve(),
+    recipeCoverUrl: () => '',
+
     // 应用
     getAppInfo: () => desktopOnly('getAppInfo'),
     setAutoLaunch: () => desktopOnly('setAutoLaunch'),
@@ -179,6 +188,11 @@ export function thumbUrl(id: number): string {
 /** 原图 URL。详情预览用,清晰度优先(缩略图只有几百像素) */
 export function fileUrl(id: number): string {
   return window.api.getFileUrl(id);
+}
+
+/** 配方封面 URL(cam-recipe 协议;无封面时加载失败,调用方用 onError 隐藏) */
+export function recipeCoverUrl(id: string): string {
+  return window.api.recipeCoverUrl(id);
 }
 
 /** 统一的错误消息提取 */

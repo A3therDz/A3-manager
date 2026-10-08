@@ -1,3 +1,8 @@
+import type { RecipeRecord } from './recipes';
+
+// LoRA 配方的记录类型定义在 ./recipes(与匹配逻辑同处,纯 TS 可被 verify 脚本直接 import)
+export type { RecipeRecord, RecipeLora } from './recipes';
+
 /**
  * 前后端共享类型契约 —— 冻结文件。
  *
@@ -524,6 +529,30 @@ export interface ApiSurface {
   getFileUrl(id: number): string;
   /** 复制任意文本到剪贴板(提示词复制按钮用) */
   copyText(text: string): Promise<void>;
+
+  // ---- LoRA 配方(v0.8)
+  // 不建表:每条配方存成 <userData>/recipes/<id>.recipe.json,与外部工具互通,
+  // 未知字段 round-trip 保留(见 src/shared/recipes.ts)。
+  /** 全部配方;解析失败的文件被跳过(主进程 console.warn) */
+  listRecipes(): Promise<RecipeRecord[]>;
+  /**
+   * 新建/更新配方。无 id(或空串)时主进程生成 uuid 并补 created_date;
+   * 每次保存都重算 fingerprint 与 modified。title 必填、loras 必须是数组。
+   * file_path 指向 recipes 目录之外的图片时,会先拷贝成 recipes/<id><原扩展名> 再指向副本。
+   */
+  saveRecipe(recipe: RecipeRecord): Promise<RecipeRecord>;
+  /** 删除配方;封面文件在 recipes 目录内时一并删除 */
+  deleteRecipe(id: string): Promise<void>;
+  /** 配方封面图 URL(cam-recipe://cover/<id>,纯前端拼接不走 IPC);无封面时协议返回 404 */
+  recipeCoverUrl(id: string): string;
+
+  /**
+   * 把图片**原文件**拖出到别的应用(ComfyUI / NovelAI 会直接读到 PNG 里的元数据)。
+   * fire-and-forget(ipcRenderer.send):必须在 dragstart 的同步阶段发起,
+   * 晚一个事件循环 Chromium 就不允许再启动原生拖拽了。
+   * 主进程用 webContents.startDrag 拖磁盘原图;只支持单文件,多选时拖第一张。
+   */
+  dragOutImages(ids: number[]): void;
 
   // 应用
   getAppInfo(): Promise<{

@@ -131,8 +131,11 @@ if (!ifaceMatch) {
    *                      直接拿真实磁盘路径,没有任何 IPC 往返
    *   onPetStateChanged —— 订阅语义:小窗/主窗口监听 pet:stateChanged 推送
    *   getFileUrl     —— 纯前端拼接,不走 IPC(生成 cam-file:// URL,由协议处理器服务原图)
+   *   recipeCoverUrl —— 纯前端拼接,不走 IPC(生成 cam-recipe://cover/<id>,由协议处理器服务封面)
+   *   dragOutImages —— fire-and-forget 语义:preload 用 ipcRenderer.send('drag-out-images'),
+   *                      主进程 ipcMain.on 里 webContents.startDrag 拖出原文件
    */
-  const NON_HANDLE = new Set(['onScanProgress', 'getThumbUrl', 'getPathForFile', 'onPetStateChanged', 'getFileUrl']);
+  const NON_HANDLE = new Set(['onScanProgress', 'getThumbUrl', 'getPathForFile', 'onPetStateChanged', 'getFileUrl', 'recipeCoverUrl', 'dragOutImages']);
   const notInMain = apiMethods.filter((m) => !NON_HANDLE.has(m) && !channels.has(m));
   const extraChannels = [...channels].filter((c) => !apiMethods.includes(c));
 
@@ -172,6 +175,7 @@ const RENDERER_FILES = [
   'src/renderer/components/Trees.tsx',
   'src/renderer/components/ImageGrid.tsx',
   'src/renderer/components/DetailPanel.tsx',
+  'src/renderer/components/RecipeManager.tsx',
 ];
 const apiMethodSet = new Set<string>();
 {

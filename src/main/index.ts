@@ -18,9 +18,11 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { AssetDb } from './db.ts';
 import { scanLibrary, THUMB_DIR_NAME, META_VERSION, type ScanProgress } from './indexer.ts';
+import { fingerprintOf, type RecipeRecord } from '../shared/recipes.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const toolsRequire = createRequire(import.meta.url);
@@ -66,6 +68,34 @@ const DATA_DIR = process.env.CAM_DATA_DIR
   ? path.resolve(process.env.CAM_DATA_DIR)
   : path.join(app.getPath('userData'), 'data');
 const DB_FILE = path.join(DATA_DIR, 'index.db');
+
+/**
+ * LoRA 配方目录(v0.8):不建表,每条配方一个 <id>.recipe.json,
+ * 格式与外部工具互通;封面图统一拷贝成 <id><原扩展名> 放在同一目录里。
+ */
+const RECIPES_DIR = path.join(app.getPath('userData'), 'recipes');
+
+/** 配方 id 只允许安全字符 —— 它会直接拼进文件名,防路径穿越 */
+function recipeFile(id: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error('非法的配方 id');
+  return path.join(RECIPES_DIR, `${id}.recipe.json`);
+}
+
+/** 该路径是否落在 recipes 目录内部(封面只允许服务/清理目录内的文件) */
+function isInRecipesDir(p: string): boolean {
+  const rel = path.relative(RECIPES_DIR, path.resolve(p));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/** 读一条配方;不存在或解析失败返回 null(不抛) */
+function readRecipeFile(id: string): RecipeRecord | null {
+  try {
+    const rec = JSON.parse(fs.readFileSync(recipeFile(id), 'utf8')) as RecipeRecord;
+    return rec && typeof rec === 'object' ? rec : null;
+  } catch {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------- 设置
 
@@ -202,6 +232,7 @@ function ensureDirs(): void {
   // 缩略图不再写到管理器目录:它们放在每个图库根目录内部(见 THUMB_DIRNAME),
   // 所以这里只需要保证自己的数据目录存在。
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(RECIPES_DIR)) fs.mkdirSync(RECIPES_DIR, { recursive: true });
 }
 
 // ---------------------------------------------------------------- 全局状态
@@ -844,6 +875,8 @@ protocol.registerSchemesAsPrivileged([
   // 自定义背景图:cam-bg://bg/current —— 具体读哪个文件由主进程的 settings 决定,
   // URL 里不带路径,渲染层拿不到也无从越权读取别的文件。
   { scheme: 'cam-bg', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } },
+  // 配方封面:cam-recipe://cover/<id> —— 只服务 recipes 目录内的封面文件(见 registerRecipeProtocol)
+  { scheme: 'cam-recipe', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true } },
 ]);
 
 /** 自定义背景图协议:只服务当前设置的这一张图 */
@@ -887,6 +920,30 @@ function registerFileProtocol(): void {
       const row = db.getImageRow(id);
       if (!row) return new Response('not found', { status: 404 });
       return net.fetch(pathToFileUrl(row.abs_path as string));
+    } catch {
+      return new Response('error', { status: 500 });
+    }
+  });
+}
+
+/**
+ * 配方封面协议:cam-recipe://cover/<id>。
+ * 按 id 读 <id>.recipe.json 里的 file_path,**只服务 recipes 目录内的文件**:
+ * 保存时外部图会被拷进来,所以外部路径的封面(外部工具直接写的 json)直接 404,
+ * 不给渲染层"指定任意路径读文件"的能力。
+ */
+function registerRecipeProtocol(): void {
+  protocol.handle('cam-recipe', async (request) => {
+    try {
+      const url = new URL(request.url);
+      const id = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+      if (!/^[A-Za-z0-9_-]+$/.test(id)) return new Response('bad id', { status: 400 });
+      const rec = readRecipeFile(id);
+      const cover = rec?.file_path;
+      if (typeof cover !== 'string' || !cover || !isInRecipesDir(cover) || !fs.existsSync(cover)) {
+        return new Response('no cover', { status: 404 });
+      }
+      return net.fetch(pathToFileUrl(cover));
     } catch {
       return new Response('error', { status: 500 });
     }
@@ -1377,6 +1434,82 @@ function registerIpc(): void {
   // 主机名必须是字母:standard scheme 下纯数字主机名会被规范化成 IPv4
   handle('getThumbUrl', (id: number) => `cam-thumb://thumb/${id}`);
 
+  // ---- LoRA 配方(v0.8):<userData>/recipes/<id>.recipe.json,一配方一文件
+  handle('listRecipes', () => {
+    const out: RecipeRecord[] = [];
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(RECIPES_DIR).filter((n) => n.endsWith('.recipe.json'));
+    } catch {
+      return out; // 目录还没有 = 还没有配方
+    }
+    for (const n of names) {
+      try {
+        const rec = JSON.parse(fs.readFileSync(path.join(RECIPES_DIR, n), 'utf8')) as RecipeRecord;
+        if (rec && typeof rec.id === 'string' && typeof rec.title === 'string') out.push(rec);
+      } catch (e) {
+        console.warn('[recipes] 跳过无法解析的配方文件:', n, e instanceof Error ? e.message : e);
+      }
+    }
+    return out;
+  });
+
+  handle('saveRecipe', (input: RecipeRecord) => {
+    const rec = (input ?? {}) as RecipeRecord;
+    if (typeof rec.title !== 'string' || !rec.title.trim()) throw new Error('配方名字不能为空');
+    if (!Array.isArray(rec.loras)) throw new Error('配方的 LoRA 列表必须是数组');
+    fs.mkdirSync(RECIPES_DIR, { recursive: true });
+
+    const now = Date.now() / 1000; // 秒级浮点,对齐外部工具的 modified/created_date
+    const hasId = typeof rec.id === 'string' && rec.id !== '';
+    const existing = hasId ? readRecipeFile(rec.id) : null;
+    const id = existing && typeof existing.id === 'string' ? existing.id : hasId ? rec.id : randomUUID();
+    // 合并顺序:磁盘上的旧记录(保留未知字段,round-trip)← 前端传来的整份 ← 我们负责的字段
+    const merged: RecipeRecord = {
+      ...(existing ?? {}),
+      ...rec,
+      id,
+      title: rec.title.trim(),
+      base_model: typeof rec.base_model === 'string' && rec.base_model.trim() ? rec.base_model.trim() : null,
+      favorite: rec.favorite === true,
+      created_date: typeof existing?.created_date === 'number' ? existing.created_date : now,
+      modified: now,
+      fingerprint: fingerprintOf(rec.loras),
+    };
+
+    // 封面:用户新选的外部图 → 拷进 recipes 目录命名为 <id><原扩展名>,file_path 指向副本;
+    // 已在 recipes 目录内的不动。换图/清除封面时把旧封面文件清掉(仅限目录内,防误删)。
+    const oldCover = typeof existing?.file_path === 'string' ? existing.file_path : null;
+    if (typeof merged.file_path === 'string' && merged.file_path && fs.existsSync(merged.file_path) && !isInRecipesDir(merged.file_path)) {
+      const ext = path.extname(merged.file_path) || '.png';
+      const target = path.join(RECIPES_DIR, `${id}${ext}`);
+      fs.copyFileSync(merged.file_path, target);
+      merged.file_path = target;
+    }
+    if (oldCover && isInRecipesDir(oldCover)) {
+      const stillUsed =
+        typeof merged.file_path === 'string' &&
+        !!merged.file_path &&
+        path.resolve(merged.file_path) === path.resolve(oldCover);
+      if (!stillUsed) {
+        try { fs.rmSync(oldCover, { force: true }); } catch { /* 封面删不掉不影响保存 */ }
+      }
+    }
+
+    fs.writeFileSync(recipeFile(id), JSON.stringify(merged, null, 2));
+    return merged;
+  });
+
+  handle('deleteRecipe', (id: string) => {
+    const rid = String(id ?? '');
+    if (!rid) return;
+    const existing = readRecipeFile(rid); // 顺带做 id 合法性校验(非法 id 返回 null)
+    if (existing && typeof existing.file_path === 'string' && existing.file_path && isInRecipesDir(existing.file_path)) {
+      try { fs.rmSync(existing.file_path, { force: true }); } catch { /* 忽略 */ }
+    }
+    try { fs.rmSync(recipeFile(rid), { force: true }); } catch { /* 配方不存在就当删过了 */ }
+  });
+
   // ---- 应用
   handle('getAppInfo', () => ({
     version: app.getVersion(),
@@ -1465,6 +1598,48 @@ function registerIpc(): void {
     if (settings.petClickThrough !== true) return;
     petWindow.setIgnoreMouseEvents(ignore === true, { forward: true });
   });
+
+  /**
+   * 拖出图片到别的应用(ComfyUI / NovelAI):磁盘原 PNG 自带元数据,
+   * 直接拖原文件即可,不需要重新编码。
+   *
+   * 这是 send(fire-and-forget)而不是 handle:webContents.startDrag 必须在
+   * 渲染层 dragstart 的同步阶段发起,invoke 的往返会让原生拖拽起不来。
+   * startDrag 只支持单文件 —— 多选拖出时只拖第一张。
+   *
+   * 注意:startDrag 接管后,这次拖拽就变成操作系统级的文件拖拽,
+   * 渲染层 dataTransfer 里的私有 MIME 可能随之丢失 —— 窗口内的落点
+   * (左侧分类)一律改从 dnd 模块级 store 读 ids,不依赖 dataTransfer。
+   */
+  ipcMain.on('drag-out-images', (e, ids: unknown) => {
+    try {
+      const list = Array.isArray(ids)
+        ? ids.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)
+        : [];
+      const id = list[0];
+      if (!id) return;
+      const row = db.getImageRow(id);
+      if (!row) return;
+      const file = row.abs_path as string;
+      if (!fs.existsSync(file)) return;
+      // 拖拽图标:优先用已缓存的缩略图;没有就从原图现场缩一张 32px
+      let icon = nativeImage.createEmpty();
+      const root = (db.listRoots() as Array<{ id: number; path: string }>).find(
+        (x) => x.id === (row.root_id as number)
+      );
+      if (root) {
+        const thumb = thumbPathFor(root.path, row.rel_path as string);
+        if (fs.existsSync(thumb)) icon = nativeImage.createFromPath(thumb);
+      }
+      if (icon.isEmpty()) {
+        const full = nativeImage.createFromPath(file);
+        if (!full.isEmpty()) icon = full.resize({ width: 32, height: 32 });
+      }
+      e.sender.startDrag({ file, icon });
+    } catch {
+      /* 拖出失败不影响窗口内部的"拖到分类"流程 */
+    }
+  });
 }
 
 function pathToFileUrl(p: string): string {
@@ -1488,6 +1663,7 @@ if (!app.requestSingleInstanceLock()) {
     registerThumbProtocol();
     registerBackgroundProtocol();
     registerFileProtocol();
+    registerRecipeProtocol();
     registerIpc();
     buildTray();
     if (settings.petEnabled) createPetWindow();

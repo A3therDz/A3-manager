@@ -20,11 +20,13 @@
  * 颜色一律走 CSS 变量,支持暗 / 亮主题。
  */
 
-import { useEffect, useRef, useState } from 'react';
-import type { CategoryNode, DetailTarget, ImageDetail, PromptBlock } from '@shared/types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CategoryNode, DetailTarget, ImageDetail, LoraEntry, PromptBlock, RecipeRecord } from '@shared/types';
+import { matchRecipes } from '@shared/recipes';
 import { errMsg, fileUrl, thumbUrl } from '../api';
 import { useDelayedClose } from '../useDelayedClose';
 import { CategoryPicker } from './CategoryPicker';
+import { RecipeCover } from './RecipeManager';
 
 interface Props {
   target: DetailTarget;
@@ -42,6 +44,12 @@ interface Props {
   /** 打开这个文件所在的磁盘目录(两种来源都支持,路径由父组件决定) */
   onOpenFolder: () => void;
   onCopyPath: (id: number) => void;
+  /** 双击预览图:全屏查看原图(v0.8 Lightbox,仅索引图有 id 可开) */
+  onOpenViewer?: (id: number) => void;
+  /** LoRA 配方库(App 顶层加载;匹配是纯渲染层计算,不动索引库) */
+  recipes: RecipeRecord[];
+  /** 「存为配方」:把当前图的全部 LoRA 预填进新建配方表单 */
+  onSaveRecipe: (loras: { file_name: string; strength: number }[]) => void;
   /** 分类归属变化后回调,父组件负责刷新分类树与网格标记 */
   onChanged: () => void;
   /** 轻提示 */
@@ -95,22 +103,75 @@ function KV({ k, v, mono = true }: { k: string; v: string | number | null | unde
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, extra, children }: { title: string; extra?: React.ReactNode; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 14 }}>
-      <h3
-        style={{
-          fontSize: 10,
-          color: 'var(--muted)',
-          textTransform: 'uppercase',
-          letterSpacing: 0.6,
-          margin: '0 0 6px',
-          fontWeight: 600,
-        }}
-      >
-        {title}
-      </h3>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, margin: '0 0 6px' }}>
+        <h3
+          style={{
+            fontSize: 10,
+            color: 'var(--muted)',
+            textTransform: 'uppercase',
+            letterSpacing: 0.6,
+            margin: 0,
+            fontWeight: 600,
+          }}
+        >
+          {title}
+        </h3>
+        {extra}
+      </div>
       {children}
+    </div>
+  );
+}
+
+/** 命中配方的 LoRA 收成一条配方卡:封面 + 配方名,点击展开配方内容 */
+function RecipeLoraBar({
+  recipe,
+  open,
+  onToggle,
+}: {
+  recipe: RecipeRecord;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const items = (Array.isArray(recipe.loras) ? recipe.loras : []).filter((l) => l && l.exclude !== true);
+  return (
+    <div className="cam-recipe-bar">
+      <button
+        type="button"
+        className="cam-recipe-head"
+        onClick={onToggle}
+        title={open ? '收起配方内容' : '展开配方内容'}
+        aria-expanded={open}
+      >
+        <RecipeCover id={recipe.id} size={26} />
+        <span className="cam-recipe-name">{recipe.title}</span>
+        <span className="cam-recipe-count">{items.length} 个 LoRA</span>
+        <span className="cam-recipe-caret">{open ? '▾' : '▸'}</span>
+      </button>
+      {open ? (
+        <div className="cam-recipe-body">
+          {items.map((l, i) => (
+            <div
+              key={`${l.file_name}-${i}`}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 8,
+                fontFamily: 'ui-monospace, Consolas, monospace',
+                fontSize: 11,
+                padding: '2px 0',
+                borderBottom: '1px solid var(--panel2)',
+              }}
+            >
+              <span style={{ wordBreak: 'break-all' }}>{l.file_name}</span>
+              <span style={{ color: 'var(--accent)', flexShrink: 0 }}>{l.strength}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -180,6 +241,9 @@ export function DetailPanel({
   onReveal,
   onOpenFolder,
   onCopyPath,
+  onOpenViewer,
+  recipes,
+  onSaveRecipe,
   onChanged,
   notify,
 }: Props) {
@@ -191,6 +255,24 @@ export function DetailPanel({
 
   // 预览图原图加载失败时退回缩略图(换图时重置)
   const [previewFallback, setPreviewFallback] = useState(false);
+
+  // LoRA 配方分组(纯渲染层计算,不改 db、不触发重扫)。
+  // hook 必须在下面的 early return 之前;匹配输入与配方库任一变化都重算。
+  const metaForLoras = indexed ? indexed.meta : dropped ? dropped.meta : null;
+  const imageLoras = metaForLoras?.loras ?? [];
+  const recipeMatch = useMemo(
+    () => matchRecipes(imageLoras.map((l) => ({ name: l.name, strength: l.strengthModel })), recipes),
+    [imageLoras, recipes]
+  );
+  /** 展开态按配方 id 记,跨翻页保留 */
+  const [expandedRecipes, setExpandedRecipes] = useState<ReadonlySet<string>>(new Set());
+  const toggleRecipeExpanded = (id: string) =>
+    setExpandedRecipes((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   // 换图 / 关闭后收起弹层,免得残留上一张的勾选状态
   useEffect(() => {
@@ -307,12 +389,23 @@ export function DetailPanel({
               // "从资源管理器拖文件进来",于是弹出一层解析元数据的提示(v0.6 修复)
               draggable={false}
               onError={() => setPreviewFallback(true)}
+              // 双击 = 全屏查看原图(v0.8);拖入的临时图没有 id,开不了
+              title={indexed ? '双击查看原图' : undefined}
+              onDoubleClick={
+                indexed && onOpenViewer
+                  ? (e) => {
+                      e.stopPropagation();
+                      onOpenViewer(indexed.id);
+                    }
+                  : undefined
+              }
               style={{
                 width: '100%',
                 height: 'auto',
                 display: 'block',
                 borderRadius: 6,
                 background: 'var(--inset)',
+                cursor: indexed && onOpenViewer ? 'zoom-in' : undefined,
               }}
             />
             {indexed ? (
@@ -398,32 +491,38 @@ export function DetailPanel({
           </table>
         </Section>
 
-        <Section title={`LoRA (${loras.length})`}>
+        <Section
+          title={`LoRA (${loras.length})`}
+          extra={
+            loras.length > 0 ? (
+              <button
+                type="button"
+                style={miniBtn}
+                title="把这张图的全部 LoRA 存成一个配方(权重与图一致)"
+                onClick={() =>
+                  onSaveRecipe(loras.map((l) => ({ file_name: l.name, strength: l.strengthModel ?? 1 })))
+                }
+              >
+                存为配方
+              </button>
+            ) : null
+          }
+        >
           {loras.length === 0 ? (
             <div style={{ color: 'var(--warn)', fontSize: 12 }}>没有使用 LoRA</div>
           ) : (
-            loras.map((l) => (
-              <div
-                key={`${l.name}-${l.nodeId}`}
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                  fontFamily: 'ui-monospace, Consolas, monospace',
-                  fontSize: 11,
-                  padding: '2px 0',
-                  borderBottom: '1px solid var(--panel2)',
-                }}
-              >
-                <span style={{ wordBreak: 'break-all' }}>{l.name}</span>
-                <span style={{ color: 'var(--accent)', flexShrink: 0 }}>
-                  {l.strengthModel === null ? '?' : l.strengthModel}
-                  {l.strengthClip !== null && l.strengthClip !== l.strengthModel
-                    ? ` / clip ${l.strengthClip}`
-                    : ''}
-                </span>
-              </div>
-            ))
+            <>
+              {/* 命中配方的 LoRA 收成配方卡(可展开);没被任何配方吸收的照常逐个列出 */}
+              {recipeMatch.matches.map(({ recipe }) => (
+                <RecipeLoraBar
+                  key={recipe.id}
+                  recipe={recipe}
+                  open={expandedRecipes.has(recipe.id)}
+                  onToggle={() => toggleRecipeExpanded(recipe.id)}
+                />
+              ))}
+              {recipeMatch.unmatched.map((i) => renderLoraRow(loras[i]))}
+            </>
           )}
         </Section>
 
@@ -521,6 +620,32 @@ export function DetailPanel({
   );
 }
 
+/** 未命中任何配方的 LoRA:保持原来的逐行渲染 */
+function renderLoraRow(l: LoraEntry) {
+  return (
+    <div
+      key={`${l.name}-${l.nodeId}`}
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        gap: 8,
+        fontFamily: 'ui-monospace, Consolas, monospace',
+        fontSize: 11,
+        padding: '2px 0',
+        borderBottom: '1px solid var(--panel2)',
+      }}
+    >
+      <span style={{ wordBreak: 'break-all' }}>{l.name}</span>
+      <span style={{ color: 'var(--accent)', flexShrink: 0 }}>
+        {l.strengthModel === null ? '?' : l.strengthModel}
+        {l.strengthClip !== null && l.strengthClip !== l.strengthModel
+          ? ` / clip ${l.strengthClip}`
+          : ''}
+      </span>
+    </div>
+  );
+}
+
 const btn: React.CSSProperties = {
   background: 'var(--panel2)',
   border: '1px solid var(--border)',
@@ -537,6 +662,16 @@ const primaryBtn: React.CSSProperties = {
   background: 'var(--accent-soft)',
   borderColor: 'var(--accent)',
   color: 'var(--accent)',
+};
+
+/** 小节标题右侧的小按钮(如 LoRA 区的「存为配方」) */
+const miniBtn: React.CSSProperties = {
+  ...btn,
+  padding: '1px 8px',
+  fontSize: 10.5,
+  color: 'var(--accent)',
+  borderColor: 'var(--accent)',
+  background: 'var(--accent-soft)',
 };
 
 const promptBox: React.CSSProperties = {

@@ -11,7 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CategoryNode, FolderNode } from '@shared/types';
 import { errMsg } from '../api';
-import { endImageDrag, isImageDrag, readImageDragIds } from '../dnd';
+import { endImageDrag, getImageDragIds, isImageDrag, readImageDragIds } from '../dnd';
 
 /** 文件夹树只需要文件夹相关字段 */
 interface FolderTreeProps {
@@ -483,8 +483,9 @@ export function CategoryTree({ categories, activeCat, onPickCat, onChanged, noti
               onDragOver={
                 onDropImage
                   ? (e) => {
-                      // 只接受"从网格里拖过来的卡片",文件拖入窗口的解析流程不受影响
-                      if (!isImageDrag(e.dataTransfer)) return;
+                      // 只接受"从网格里拖过来的卡片",文件拖入窗口的解析流程不受影响;
+                      // MIME 被 startDrag 吃掉时退回看模块级 store
+                      if (!isImageDrag(e.dataTransfer) && getImageDragIds().length === 0) return;
                       e.preventDefault();
                       e.dataTransfer.dropEffect = 'copy';
                       markDragOver(n.id);
@@ -494,7 +495,7 @@ export function CategoryTree({ categories, activeCat, onPickCat, onChanged, noti
               onDragEnter={
                 onDropImage
                   ? (e) => {
-                      if (!isImageDrag(e.dataTransfer)) return;
+                      if (!isImageDrag(e.dataTransfer) && getImageDragIds().length === 0) return;
                       dragLeaveDepth.current += 1;
                       markDragOver(n.id);
                     }
@@ -511,10 +512,14 @@ export function CategoryTree({ categories, activeCat, onPickCat, onChanged, noti
               onDrop={
                 onDropImage
                   ? (e) => {
-                      if (!isImageDrag(e.dataTransfer)) return;
+                      if (!isImageDrag(e.dataTransfer) && getImageDragIds().length === 0) return;
                       e.preventDefault();
                       e.stopPropagation();
-                      const ids = readImageDragIds(e.dataTransfer);
+                      // 优先读模块级 store:startDrag(拖出)接管后
+                      // dataTransfer 的私有 MIME 可能已被原生拖拽吃掉
+                      const ids = getImageDragIds().length
+                        ? getImageDragIds()
+                        : readImageDragIds(e.dataTransfer);
                       endImageDrag();
                       clearDragOver();
                       if (ids.length) onDropImage(n.id, ids);

@@ -11,12 +11,14 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CategoryNode, DetailTarget, DroppedInspection, FolderNode, ImageQuery, LibraryRoot, SortKey } from '@shared/types';
+import type { CategoryNode, DetailTarget, DroppedInspection, FolderNode, ImageQuery, LibraryRoot, RecipeRecord, SortKey } from '@shared/types';
 import { errMsg, useCategories, useFolders, useImageDetail, useImages, useScanProgress, useStats } from './api';
 import { CategoryTree, FolderTree, FolderVisibilityTree } from './components/Trees';
 import { ImageGrid } from './components/ImageGrid';
 import { DetailPanel } from './components/DetailPanel';
 import { CategoryPicker } from './components/CategoryPicker';
+import { Lightbox } from './components/Lightbox';
+import { RecipeManager, type RecipeDraftLora } from './components/RecipeManager';
 import { endImageDrag, hasImageDragData, isInternalImageDrag } from './dnd';
 import { prefersReducedMotion, useDelayedClose } from './useDelayedClose';
 
@@ -100,6 +102,16 @@ function StarIcon({ filled = false }: { filled?: boolean }) {
       strokeLinejoin="round"
     >
       <path d="M12 3.6l2.6 5.3 5.9.85-4.25 4.14 1 5.86L12 17l-5.25 2.75 1-5.86L3.5 9.75l5.9-.85z" />
+    </svg>
+  );
+}
+
+/** 配方:书本图标(LoRA 配方管理入口) */
+function RecipeIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
     </svg>
   );
 }
@@ -379,6 +391,11 @@ export function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const detail = useImageDetail(selectedId);
 
+  // 全屏原图查看器(v0.8):双击网格卡片 / 详情预览图打开。
+  // 开/关状态放这里,翻页直接复用当前标签页已加载的 rows;
+  // Esc 链里它优先级最高(先关查看器,不关详情)。
+  const { value: lightboxId, closing: lightboxClosing, open: openLightbox, close: closeLightbox } = useDelayedClose<number>();
+
   // 轻提示(收藏/分类/文件操作的结果反馈):展示 2200ms 后先播退场动画,再卸载
   const { value: toast, closing: toastClosing, open: openToast, close: closeToast } = useDelayedClose<{ msg: string; bad: boolean }>();
   const toastTimer = useRef(0);
@@ -417,6 +434,18 @@ export function App() {
   const [aliasValue, setAliasValue] = useState('');
 
   const { value: settingsOpen, closing: settingsClosing, open: openSettings, close: closeSettings } = useDelayedClose<true>();
+
+  // ---- LoRA 配方(v0.8):顶层加载一次,详情面板的分组显示与配方管理弹层共用
+  const [recipes, setRecipes] = useState<RecipeRecord[]>([]);
+  const reloadRecipes = useCallback(() => {
+    window.api.listRecipes().then(setRecipes).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    reloadRecipes();
+  }, [reloadRecipes]);
+  // 配方管理弹层;initialLoras 非空时直接进新建表单(详情面板「存为配方」)
+  const { value: recipeModal, closing: recipeClosing, open: openRecipeModal, close: closeRecipeModal } =
+    useDelayedClose<{ initialLoras?: RecipeDraftLora[] }>();
   const [closeToTray, setCloseToTray] = useState(true);
   // 平面模式:关掉实时模糊与进场动画(显卡弱 / 远程桌面时用)
   const [reduceEffects, setReduceEffects] = useState(false);
@@ -1018,6 +1047,17 @@ export function App() {
     if (viewIdx >= 0 && viewIdx < rows.length - 1) setSelectedId(rows[viewIdx + 1].id);
   }, [rows, viewIdx]);
 
+  /** 查看器翻页:与详情翻页同一份 rows(当前标签页已加载列表) */
+  const lightboxStep = useCallback(
+    (dir: 1 | -1) => {
+      if (lightboxId === null) return;
+      const i = rows.findIndex((r) => r.id === lightboxId);
+      const j = i + dir;
+      if (i >= 0 && j >= 0 && j < rows.length) openLightbox(rows[j].id);
+    },
+    [lightboxId, rows, openLightbox]
+  );
+
   // 键盘:Esc 关详情/菜单/设置,← → 翻页,/ 聚焦搜索,Ctrl+T/W/Tab 管标签页
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1056,7 +1096,9 @@ export function App() {
         return;
       }
       if (e.key === 'Escape') {
-        if (folderMenu) closeFolderMenu();
+        // 查看器优先级最高:先关查看器,不关它下面的详情面板
+        if (lightboxId !== null) closeLightbox();
+        else if (folderMenu) closeFolderMenu();
         else if (moreMenu) closeMoreMenu();
         else if (selectedIds.size) closeSelection();
         // 多选模式:先清空选择(上面那条),再退出模式;优先级高于详情面板
@@ -1065,8 +1107,15 @@ export function App() {
         else if (confirmBatchDelete) closeConfirmBatchDelete();
         else if (removeRootTarget) closeRemoveRoot();
         else if (confirmDeleteId !== null) closeConfirmDelete();
+        else if (recipeModal) closeRecipeModal();
         else if (settingsOpen) closeSettings();
         else if (selectedId !== null) closeDetail();
+        return;
+      }
+      // 查看器开着时:← → 归查看器翻页(不再翻详情),其余键不往下走
+      if (lightboxId !== null) {
+        if (e.key === 'ArrowLeft') lightboxStep(-1);
+        else if (e.key === 'ArrowRight') lightboxStep(1);
         return;
       }
       if (
@@ -1075,6 +1124,7 @@ export function App() {
         folderMenu ||
         moreMenu ||
         settingsOpen ||
+        recipeModal ||
         confirmDeleteId !== null ||
         renameTarget !== null
       ) {
@@ -1090,7 +1140,7 @@ export function App() {
     settingsOpen, confirmDeleteId, renameTarget, selectedIds, refreshList,
     selectMode, exitSelectMode, closeFolderMenu, closeMoreMenu, closeSelection,
     closeMenu, closeConfirmBatchDelete, closeRemoveRoot, closeConfirmDelete,
-    closeSettings,
+    closeSettings, lightboxId, lightboxStep, closeLightbox, recipeModal, closeRecipeModal,
     // closeDetail 在后面才声明,进 deps 会触发 TDZ;它是稳定的 useCallback,缺失无影响
     // eslint-disable-next-line react-hooks/exhaustive-deps
   ]);
@@ -1410,6 +1460,7 @@ export function App() {
       setActiveTabId(target.id);
       pendingScrollRef.current = target.scrollTop;
       closeSelection();
+      closeLightbox();
       if (target.selectedId !== null) {
         setTempDetail(null);
         setSelectedId(target.selectedId);
@@ -1429,6 +1480,7 @@ export function App() {
     setActiveTabId(t.id);
     pendingScrollRef.current = 0;
     closeSelection();
+    closeLightbox();
     if (selectedId !== null || tempDetail) closeDetail();
     restore(t.query, 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1665,8 +1717,17 @@ export function App() {
           </button>
           <button
             type="button"
-            title="设置"
+            title="LoRA 配方管理:给一组 LoRA 起名、配封面,详情面板里按配方分组显示"
             style={{ ...btn, marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 5 }}
+            onClick={() => openRecipeModal({})}
+          >
+            <RecipeIcon />
+            配方
+          </button>
+          <button
+            type="button"
+            title="设置"
+            style={{ ...btn, display: 'inline-flex', alignItems: 'center', gap: 5 }}
             onClick={() => openSettings(true)}
           >
             <GearIcon />
@@ -1877,6 +1938,8 @@ export function App() {
                 onSelect={handleSelect}
                 zoom={gridZoom}
                 openId={selectedId}
+                // 多选模式下双击不抢"单击=切换选中"的语义
+                onOpenViewer={(id) => { if (!selectMode) openLightbox(id); }}
                 onDragEnd={() => endImageDrag()}
               />
             </>
@@ -1915,6 +1978,9 @@ export function App() {
                   .then(() => notify('路径已复制'))
                   .catch((e) => notify(errMsg(e), true))
               }
+              onOpenViewer={(id) => openLightbox(id)}
+              recipes={recipes}
+              onSaveRecipe={(ls) => openRecipeModal({ initialLoras: ls })}
               onChanged={refreshCategories}
               notify={notify}
             />
@@ -2379,6 +2445,17 @@ export function App() {
         </div>
       ) : null}
 
+      {recipeModal ? (
+        <RecipeManager
+          recipes={recipes}
+          closing={recipeClosing}
+          initialLoras={recipeModal.initialLoras}
+          onClose={() => closeRecipeModal()}
+          onChanged={reloadRecipes}
+          notify={notify}
+        />
+      ) : null}
+
       {settingsOpen ? (
         <div className={`cam-modal${settingsClosing ? ' closing' : ''}`} onClick={(e) => { if (e.target === e.currentTarget) closeSettings(); }}>
           <div style={{ width: 520, maxHeight: '82vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
@@ -2608,6 +2685,17 @@ export function App() {
       ) : null}
 
       {toast ? <div className={`cam-toast${toast.bad ? ' bad' : ''}${toastClosing ? ' closing' : ''}`}>{toast.msg}</div> : null}
+
+      {/* 全屏原图查看器:压在所有弹层之上(z-index 400),Esc 先关它(见键盘钩子) */}
+      {lightboxId !== null ? (
+        <Lightbox
+          rows={rows}
+          id={lightboxId}
+          closing={lightboxClosing}
+          onClose={closeLightbox}
+          onNavigate={openLightbox}
+        />
+      ) : null}
     </div>
   );
 }

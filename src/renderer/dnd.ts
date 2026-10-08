@@ -30,6 +30,14 @@ let current: ImageDragPayload | null = null;
 /** 卡片 onDragStart 调用:打标记 + 记下 payload */
 export function startImageDrag(ids: number[], dt: DataTransfer | null): void {
   current = { ids };
+  // 同时把原文件拖出给外部应用(ComfyUI / NovelAI 直接读 PNG 元数据)。
+  // 必须在这里(dragstart 同步阶段)发起,过了这一拍 Chromium 就不允许起原生拖拽了。
+  // startDrag 接管后 dataTransfer 的私有 MIME 可能丢失,落点一律改读 getImageDragIds()。
+  try {
+    window.api.dragOutImages(ids);
+  } catch {
+    /* 非桌面环境(浏览器调试)没有这条通道,内部拖拽不受影响 */
+  }
   if (!dt) return;
   try {
     dt.setData(IMAGE_DND_MIME, ids.join(','));
@@ -43,6 +51,17 @@ export function startImageDrag(ids: number[], dt: DataTransfer | null): void {
 
 export function endImageDrag(): void {
   current = null;
+}
+
+/**
+ * 从模块级 store 读这次拖拽的图片 id(不碰 DataTransfer)。
+ *
+ * 拖出功能(startDrag)接管后,私有 MIME / text 兜底都可能被原生拖拽吃掉,
+ * 这时 dataTransfer 上已经什么都读不到 —— 落点(分类树)必须优先走这里。
+ * dragstart 写入、dragend/drop 清除,一个渲染进程同一时刻只有一条拖拽会话。
+ */
+export function getImageDragIds(): number[] {
+  return current ? current.ids : [];
 }
 
 /**

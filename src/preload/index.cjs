@@ -84,6 +84,18 @@ const api = {
   openExternal: (id) => call('openExternal', id),
   copyPath: (id) => call('copyPath', id),
   copyText: (text) => call('copyText', text),
+  /**
+   * 拖出原文件到别的应用(ComfyUI / NovelAI 能直接读到 PNG 元数据)。
+   * 必须是 send(fire-and-forget):startDrag 要在 dragstart 的同步阶段到达主进程,
+   * 用 invoke 会多等一轮 IPC,原生的拖拽会话就起不来了。
+   */
+  dragOutImages: (ids) => {
+    try {
+      ipcRenderer.send('drag-out-images', ids);
+    } catch {
+      /* 非桌面环境没有这条通道,内部拖拽不受影响 */
+    }
+  },
   deleteImage: (id) => call('deleteImage', id),
   moveImage: (id) => call('moveImage', id),
   renameImage: (id, newName) => call('renameImage', id, newName),
@@ -106,6 +118,13 @@ const api = {
   getThumbUrl: (id) => `cam-thumb://thumb/${id}`,
   // 原图:详情预览要清晰度,缩略图只有几百像素
   getFileUrl: (id) => `cam-file://file/${id}`,
+
+  // ---- LoRA 配方(v0.8)
+  listRecipes: () => call('listRecipes'),
+  saveRecipe: (recipe) => call('saveRecipe', recipe),
+  deleteRecipe: (id) => call('deleteRecipe', id),
+  // 配方封面:纯前端拼接,不走 IPC(同 getThumbUrl)
+  recipeCoverUrl: (id) => `cam-recipe://cover/${encodeURIComponent(id)}`,
 
   // ---- 应用
   getAppInfo: () => call('getAppInfo'),

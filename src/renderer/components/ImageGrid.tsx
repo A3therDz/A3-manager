@@ -38,6 +38,8 @@ interface Props {
   zoom: number;
   /** 当前在详情面板里打开的那张图:卡片高亮发光,一眼看出在看哪张 */
   openId?: number | null;
+  /** 双击卡片:全屏查看原图(v0.8 Lightbox) */
+  onOpenViewer?: (id: number) => void;
   /** 一次拖拽结束(不管有没有放下):父组件用它把"内部拖拽"状态清掉 */
   onDragEnd?: () => void;
 }
@@ -58,6 +60,7 @@ export const ImageGrid = memo(function ImageGrid({
   onSelect,
   zoom,
   openId,
+  onOpenViewer,
   onDragEnd,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -132,6 +135,9 @@ export const ImageGrid = memo(function ImageGrid({
               e.preventDefault();
               onContextMenu(r.id, e.clientX, e.clientY);
             }}
+            // 双击 = 全屏查看原图。单击开详情的逻辑不动:双击会先触发两次单击
+            // (同一个 id,幂等),再打开查看器盖在详情之上。
+            onDoubleClick={() => onOpenViewer?.(r.id)}
             /**
              * 拖到左侧分类 = 加入分类(v0.6 需求)。
              * 拖的是"卡"而不是"图":img 上必须写死 draggable={false},
@@ -153,7 +159,7 @@ export const ImageGrid = memo(function ImageGrid({
               setDraggingId(null);
               onDragEnd?.();
             }}
-            title={`${r.fileName}\n拖动可放到左侧分类里`}
+            title={`${r.fileName}\n双击查看原图 · 拖动可放到左侧分类里`}
             style={{
               gridRowEnd: `span ${span}`,
               position: 'relative',

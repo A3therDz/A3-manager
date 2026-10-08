@@ -435,6 +435,7 @@ style.textContent = `
   html[data-lite='1'] .cam-menu-mask.closing,
   html[data-lite='1'] .cam-modal.closing,
   html[data-lite='1'] .cam-modal.closing > div,
+  html[data-lite='1'] .cam-lightbox.closing,
   html[data-lite='1'] .cam-toast.closing { animation-duration: 1ms !important; }
 
   /* 文件拖进窗口时的提示层:固定盖住整屏,既不拦截事件也不引起重排 */
@@ -460,6 +461,30 @@ style.textContent = `
     padding: 6px 12px 4px; color: var(--muted); font-size: 10.5px;
     text-transform: uppercase; letter-spacing: 0.5px;
   }
+  /* ---- 全屏原图查看器(v0.8)----
+     压在整屏滚动网格上:用 97% 不透明底色(var(--modal-bg)),不开 backdrop-filter;
+     图片平移/缩放只走 transform。 */
+  .cam-lightbox { position: fixed; inset: 0; z-index: 400; background: var(--modal-bg);
+    display: flex; animation: cam-fade var(--dur-2) var(--ease); }
+  .cam-lightbox.closing { animation: cam-fade-out var(--dur-1) var(--ease) forwards; }
+  .cam-lb-stage { position: absolute; inset: 0; overflow: hidden;
+    display: flex; align-items: center; justify-content: center; }
+  .cam-lb-stage img { display: block; user-select: none; box-shadow: 0 10px 44px rgba(0,0,0,.5); }
+  .cam-lb-top { position: absolute; top: 0; left: 0; right: 0; z-index: 2;
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px; font-size: 12px;
+    background: color-mix(in srgb, var(--panel) 88%, transparent);
+    border-bottom: 1px solid var(--border); }
+  .cam-lb-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cam-lb-btn { background: var(--ctl-bg); border: 1px solid var(--ctl-border); color: var(--fg);
+    border-radius: var(--radius-md); padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer;
+    transition: border-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease); }
+  .cam-lb-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .cam-lb-btn:disabled { opacity: .4; cursor: default; }
+  .cam-lb-nav { position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
+    width: 40px; height: 56px; padding: 0; font-size: 22px; line-height: 1;
+    display: flex; align-items: center; justify-content: center; }
+  .cam-lb-nav.prev { left: 12px; }
+  .cam-lb-nav.next { right: 12px; }
   /* 工具条永不换行:窄窗口时把「只看收藏 / 模型 / 排序」收进「更多」 */
   @media (max-width: 1180px) {
     .cam-tb-opt { display: none !important; }
@@ -705,8 +730,37 @@ style.textContent = `
     -webkit-backdrop-filter: none !important;
     background: var(--card) !important;
   }
+  /* ---- LoRA 配方(v0.8 第3条)----
+     详情面板:命中配方的 LoRA 收成一条配方卡,点击展开配方内容;
+     配方管理弹层的列表行也用同一套封面样式。 */
+  .cam-recipe-bar { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px;
+    background: color-mix(in srgb, var(--panel2) 70%, transparent); overflow: hidden; }
+  .cam-recipe-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 8px;
+    background: none; border: 0; color: var(--fg); font: inherit; font-size: 12px;
+    cursor: pointer; text-align: left;
+    transition: background-color var(--dur-1) var(--ease); }
+  .cam-recipe-head:hover { background: var(--accent-soft); }
+  .cam-recipe-cover { border-radius: 5px; object-fit: cover; flex-shrink: 0;
+    background: var(--inset); display: inline-flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 11px; }
+  .cam-recipe-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-weight: 600; }
+  .cam-recipe-count { flex-shrink: 0; color: var(--accent); font-size: 10.5px;
+    background: var(--accent-bg); border-radius: 999px; padding: 0 7px; line-height: 16px; }
+  .cam-recipe-caret { flex-shrink: 0; color: var(--muted); font-size: 10px; }
+  .cam-recipe-body { padding: 4px 10px 7px 42px; border-top: 1px solid var(--border);
+    animation: cam-fade var(--dur-2) var(--ease); }
+  .cam-recipe-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: color-mix(in srgb, var(--panel2) 55%, transparent); }
+  .cam-recipe-fav { background: none; border: 0; cursor: pointer; font-size: 14px;
+    padding: 0 2px; line-height: 1; color: var(--muted); font-family: inherit;
+    transition: color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease); }
+  .cam-recipe-fav.on { color: #ffd166; }
+  .cam-recipe-fav:active { transform: scale(1.25); }
+
   @media (prefers-reduced-motion: reduce) {
-    .cam-card, .cam-detail, .cam-modal, .cam-modal > div, .cam-menu, .cam-toast, .cam-selectbar, .cam-tab { animation: none !important; }
+    .cam-card, .cam-detail, .cam-modal, .cam-modal > div, .cam-menu, .cam-toast, .cam-selectbar, .cam-tab, .cam-lightbox, .cam-recipe-body { animation: none !important; }
     .cam-detail-slot { transition: none; }
     .cam-card img { opacity: 1 !important; transition: none; }
     .cam-card:hover { transform: none; }
