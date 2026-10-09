@@ -1345,6 +1345,8 @@ export function App() {
   const reloadersRef = useRef({ stats: stats.reload, folders: folders.reload, categories: categories.reload, recipeStats: reloadRecipeStats });
   reloadersRef.current = { stats: stats.reload, folders: folders.reload, categories: categories.reload, recipeStats: reloadRecipeStats };
   const lastScanDoneRef = useRef<number | null>(null);
+  /** 扫描后的"侧栏/统计"重拉定时器:连着一批一批入库时合并成一次(见下面的说明) */
+  const scanReloadTimerRef = useRef<number | null>(null);
   useEffect(() => {
     if (!progress || progress.phase !== 'done') return;
     const key = progress.finishedAt ?? 0;
@@ -1357,13 +1359,30 @@ export function App() {
         && progress.indexed === 0 && progress.removed === 0) {
       return;
     }
+    // 当前视图立刻原地刷新:新图马上出现在网格里(不动页码/滚动)。
     void refresh();
-    reloadersRef.current.stats();
-    reloadersRef.current.folders();
-    reloadersRef.current.categories();
-    // 配方命中数也可能变了(主进程缓存已失效,重拉一次)
-    reloadersRef.current.recipeStats();
+    /**
+     * 侧栏与统计**延后合并**再拉。
+     *
+     * 出图是一批一批落盘的(ComfyUI 一次写十几张、隔几秒又一批),主进程那侧每批都会
+     * 报一次"扫描完成";而 folders/stats/配方统计这几条查询要扫全库(实测:视图查询
+     * 加索引前 100ms、库统计 1.9s、配方统计 0.2s),每批都拉一次会让主进程连接被占满,
+     * 用户在这期间做任何事(哪怕只是删几张图)都要排队等 —— 表现出来就是"一直在卡"。
+     * 这里统一延后 700ms 并重置计时器:连着的多批只拉一次。
+     */
+    if (scanReloadTimerRef.current !== null) window.clearTimeout(scanReloadTimerRef.current);
+    scanReloadTimerRef.current = window.setTimeout(() => {
+      scanReloadTimerRef.current = null;
+      const r = reloadersRef.current;
+      r.stats();
+      r.folders();
+      r.categories();
+      r.recipeStats();
+    }, 700);
   }, [progress, refresh]);
+  useEffect(() => () => {
+    if (scanReloadTimerRef.current !== null) window.clearTimeout(scanReloadTimerRef.current);
+  }, []);
 
   /** 根容器:文件拖放的监听目标 */
   const rootRef = useRef<HTMLDivElement | null>(null);

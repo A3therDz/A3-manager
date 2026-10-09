@@ -163,6 +163,10 @@ CREATE INDEX IF NOT EXISTS idx_images_sampler      ON images(sampler_name);
 CREATE INDEX IF NOT EXISTS idx_images_dims         ON images(width, height);
 CREATE INDEX IF NOT EXISTS idx_images_starred      ON images(starred) WHERE starred = 1;
 CREATE INDEX IF NOT EXISTS idx_images_path         ON images(abs_path);
+-- 默认视图(某个图库根 + 最新优先)的排序索引:v0.8 性能轮补上。
+-- 没有它时这条查询会先按 root_id 取行再 USE TEMP B-TREE 排序,真实库(1.8 万张)
+-- 实测 100ms/次(冷盘 1.1s);有了它走覆盖索引,0ms。侧栏/标签/无限滚动每次翻页都要走这条。
+CREATE INDEX IF NOT EXISTS idx_images_root_mtime   ON images(root_id, file_mtime DESC, id DESC);
 
 -- 库级键值对(目前只存 meta_version:解析器口径版本)
 CREATE TABLE IF NOT EXISTS kv (
@@ -173,6 +177,9 @@ CREATE TABLE IF NOT EXISTS kv (
 CREATE TABLE IF NOT EXISTS lora_refs (
   image_id    INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
   name        TEXT NOT NULL,
+  -- 规范化名字(normalizeLoraName 的结果):配方筛选/统计直接按它走索引,
+  -- 不必对每行调 SQL 函数。老库由 #migrateLoraBaseName 补列 + 回填 + 建索引。
+  base_name   TEXT,
   strength    REAL,
   PRIMARY KEY (image_id, name)
 );
@@ -267,6 +274,49 @@ export class AssetDb {
     );
     this.db.exec(SCHEMA);
     this.#migrateContentlessFts();
+    this.#migrateLoraBaseName();
+  }
+
+  /**
+   * 老库的 lora_refs 没有 base_name 列(规范化名字)。
+   *
+   * 为什么要这一列:配方筛选/统计以前写 `EXISTS(... cam_lora_base(lr.name) = ?)`,
+   * **每行都要算一次 JS 函数**,索引也用不上。17 个配方的命中数统计在
+   * 1.8 万张图的真实库上要 2.8~3.1 秒纯同步 SQL(主进程硬冻结)。
+   *
+   * 迁移只从库里已有的 name 回填(不重读 PNG),所以不动 META_VERSION。
+   * 新库的 DDL 已含该列,这里只是补建索引。
+   *
+   * **索引必须是 (base_name, image_id) 复合索引,不能只建 (base_name)**:
+   * 只建 (base_name) 时 SQLite 会用"按名字找行、再回表比对 image_id"的计划,
+   * 一个常见 LoRA 有上万张图,EXISTS 每次都要沿索引扫上千条才能碰到目标行 ——
+   * 实测一次配方筛选从 102ms 退化到 4920ms。带上 image_id 后两列都是等值条件,
+   * 直接定位到唯一一行,同一次筛选 10ms。
+   */
+  #migrateLoraBaseName(): void {
+    const cols = this.db.prepare('PRAGMA table_info(lora_refs)').all() as Array<{ name: string }>;
+    const t0 = Date.now();
+    const hadColumn = cols.some((c) => c.name === 'base_name');
+    if (!hadColumn) this.db.exec('ALTER TABLE lora_refs ADD COLUMN base_name TEXT');
+
+    /**
+     * 有 NULL 就补回填。
+     * 不只看"列在不在":上次迁移中途被打断(补了列没回填)的库,列是有的但值全是 NULL,
+     * 那样配方筛选会一张都命中不了。这条探测走 base_name 索引(`IS NULL` 也能用),
+     * 回填完成后是 0ms 的索引查找,不是全表扫描。
+     */
+    const pending = this.db.prepare('SELECT 1 AS x FROM lora_refs WHERE base_name IS NULL LIMIT 1').get();
+    if (pending !== undefined) {
+      this.db.exec('UPDATE lora_refs SET base_name = cam_lora_base(name) WHERE base_name IS NULL');
+      console.log(`[db] lora_refs 迁移:${hadColumn ? '补' : '补列 + '}回填 base_name,${Date.now() - t0}ms`);
+    }
+
+    // 形状不对的旧索引(只有 base_name 一列)先删掉重建,否则 IF NOT EXISTS 会把慢计划留下
+    const idxSql = (this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_lora_refs_base'`)
+      .get() as { sql: string } | undefined)?.sql;
+    if (idxSql && !/image_id/.test(idxSql)) this.db.exec('DROP INDEX idx_lora_refs_base');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_lora_refs_base ON lora_refs(base_name, image_id)');
   }
 
   /**
@@ -404,6 +454,58 @@ export class AssetDb {
     return m;
   }
 
+  /**
+   * 单条 rel_path 的指纹(id + mtime + size)。定点入库(scanPaths)用:
+   * 只处理几个文件时不该把整库 1.8 万条指纹全加载进内存。
+   * (root_id, rel_path) 上有唯一索引,单条查询是索引命中。
+   */
+  getImageByRelPath(rootId: number, relPath: string): { id: number; mtime: number; size: number } | null {
+    const r = this.db
+      .prepare('SELECT id, file_mtime, file_size FROM images WHERE root_id = ? AND rel_path = ?')
+      .get(rootId, relPath) as { id: number; file_mtime: number; file_size: number } | undefined;
+    return r ? { id: r.id, mtime: r.file_mtime, size: r.file_size } : null;
+  }
+
+  /**
+   * 某个目录(含子目录)下的图片相对路径,最多 limit 条。
+   * 定点清理"目录被删"时用它抽样确认:这些路径在盘上还在不在。
+   */
+  indexedRelPathsUnder(rootId: number, relDir: string, limit = 3): string[] {
+    const base = String(relDir ?? '').replace(/[\\/]+$/, '');
+    if (!base) return [];
+    return (
+      this.db
+        .prepare(
+          `SELECT rel_path FROM images
+           WHERE root_id = ? AND (rel_dir = ? OR rel_dir LIKE ? ESCAPE '!' OR rel_dir LIKE ? ESCAPE '!')
+           LIMIT ?`
+        )
+        .all(rootId, base, descPattern(base, '\\'), descPattern(base, '/'), limit) as Array<{ rel_path: string }>
+    ).map((r) => r.rel_path);
+  }
+
+  /** 删掉某个目录(含子目录)下的所有索引行,返回删掉的行数 */
+  deleteImagesUnderRelDir(rootId: number, relDir: string): number {
+    const base = String(relDir ?? '').replace(/[\\/]+$/, '');
+    if (!base) return 0;
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM images
+         WHERE root_id = ? AND (rel_dir = ? OR rel_dir LIKE ? ESCAPE '!' OR rel_dir LIKE ? ESCAPE '!')`
+      )
+      .all(rootId, base, descPattern(base, '\\'), descPattern(base, '/')) as Array<{ id: number }>;
+    if (rows.length === 0) return 0;
+    const del = this.db.prepare('DELETE FROM images WHERE id = ?');
+    const delFts = this.db.prepare('DELETE FROM images_fts WHERE rowid = ?');
+    this.transaction(() => {
+      for (const r of rows) {
+        delFts.run(r.id);
+        del.run(r.id);
+      }
+    });
+    return rows.length;
+  }
+
   // ------------------------------------------------------------ 写入
 
   /** 插入或更新一张图。返回 { id, created } */
@@ -479,8 +581,12 @@ export class AssetDb {
     }
 
     if (input.loras.length) {
-      const insLora = this.db.prepare('INSERT OR REPLACE INTO lora_refs (image_id, name, strength) VALUES (?,?,?)');
-      for (const l of input.loras) insLora.run(id, l.name, l.strength);
+      // base_name 在 JS 侧一次算好再写 —— 不在 SQL 里调 cam_lora_base,
+      // 免得每行都过一遍自定义函数(建库/回填之外不该再用它)。
+      const insLora = this.db.prepare(
+        'INSERT OR REPLACE INTO lora_refs (image_id, name, base_name, strength) VALUES (?,?,?,?)'
+      );
+      for (const l of input.loras) insLora.run(id, l.name, normalizeLoraName(l.name), l.strength);
     }
     this.db.prepare('INSERT INTO images_fts (rowid, value) VALUES (?, ?)').run(id, input.searchText);
 
@@ -530,6 +636,19 @@ export class AssetDb {
 
   setTreeSignature(rootId: number, sig: { count: number; rootMtime: number }): void {
     this.setKv('tree_sig_' + rootId, JSON.stringify(sig));
+  }
+
+  /**
+   * 作废目录树签名 → 下一次启动扫描会老实走一遍全量对账。
+   * 用在"整目录被删/搬走"这种拿不准净变化的场景:定点清理只保证"不再指向不存在的路径",
+   * 若那其实是**目录改名**、文件还在新路径上,只有一次全量对账才能把它们重新收进来。
+   */
+  clearTreeSignature(rootId: number): void {
+    try {
+      this.db.prepare('DELETE FROM kv WHERE key = ?').run('tree_sig_' + rootId);
+    } catch {
+      /* 清不掉就留着,下次签名不一致自然会全量扫 */
+    }
   }
 
   /** 某个图库根当前索引到的行数(用来判断"要不要做第一次扫描") */
@@ -673,8 +792,12 @@ export class AssetDb {
     /**
      * 按 LoRA 配方筛选(v0.8,内部字段,由主进程把 recipeId 展开后传入,渲染层不直接传)。
      * 子集语义(与 shared/recipes.ts 的 matchRecipes 同口径):
-     * 每条非 exclude 的 LoRA 一个 EXISTS,全部满足才算命中;名字两边都过 cam_lora_base 规范化。
+     * 每条非 exclude 的 LoRA 一个 EXISTS,全部满足才算命中。
      * **只看名字,不看权重** —— 出图时调过权重不该让整组配方失效(见 matchRecipes 的说明)。
+     *
+     * 规范化:配方侧的裸名先过 normalizeLoraName(与 cam_lora_base 同一份真源),
+     * 图侧比的是写入时就存好的 lora_refs.base_name 列 —— 相等即可走索引,
+     * 不用对每一行再调一次 SQL 函数(那是 17 个配方要 3 秒的原因)。
      */
     if (q.recipeNoMatch === true) {
       // 配方不存在 / 无有效 LoRA -> 空结果,而不是当成"不过滤"(与"分类不存在"的先例一致)
@@ -687,7 +810,7 @@ export class AssetDb {
         const base = normalizeLoraName(raw);
         if (!base) continue;
         push(
-          `EXISTS (SELECT 1 FROM lora_refs lr WHERE lr.image_id = i.id AND cam_lora_base(lr.name) = ?)`,
+          `EXISTS (SELECT 1 FROM lora_refs lr WHERE lr.image_id = i.id AND lr.base_name = ?)`,
           base
         );
       }
@@ -769,6 +892,59 @@ export class AssetDb {
   }
 
   // ------------------------------------------------------------ 配方比对(v0.8)
+
+  /**
+   * 一批配方的命中数(左侧「配方」小节的数量胶囊),一次查询算完。
+   *
+   * 为什么不用"每配方一条 queryImages().total":那要为 17 个配方各跑一次全表 COUNT,
+   * 且每条 LoRA 一个 `cam_lora_base(lr.name) = ?` 的 EXISTS —— 每行都要算 JS 函数,
+   * 1.8 万张图的真实库实测 **2.8~3.1 秒纯同步 SQL**(主进程整段冻结)。
+   *
+   * 这里的做法:
+   *   1. 需求集写进临时表 need(recipe_id, base):`lora_refs(base_name, image_id)` 索引可用
+   *      (DISTINCT image_id + base_name 正好是覆盖索引);
+   *   2. 一条查询按「每张图对每个配方命中了几条 / 该配方总共要几条」自连接,
+   *      hit = need_n 即"子集齐了"(与按配方筛选的 EXISTS 口径**逐条一致**);
+   *   3. 返回的 Map 里没有的配方 = 0 命中(含"配方没有任何有效 LoRA"的情况)。
+   *
+   * 临时表随连接存在,复用同一份 DDL;node:sqlite 是同步 API,
+   * 同一连接上不会真的并发,方法内部自洽(每次先清空再写)。
+   */
+  recipeCounts(need: Array<{ recipeId: string; names: string[] }>): Map<string, number> {
+    const out = new Map<string, number>();
+    if (!Array.isArray(need) || need.length === 0) return out;
+
+    this.db.exec('CREATE TEMP TABLE IF NOT EXISTS need(recipe_id TEXT, base TEXT, PRIMARY KEY(recipe_id, base))');
+    this.db.exec('DELETE FROM need');
+    const ins = this.db.prepare('INSERT OR IGNORE INTO need(recipe_id, base) VALUES(?,?)');
+    let rows = 0;
+    for (const n of need) {
+      const recipeId = String(n.recipeId ?? '');
+      if (!recipeId) continue;
+      for (const raw of Array.isArray(n.names) ? n.names : []) {
+        const base = normalizeLoraName(typeof raw === 'string' ? raw : '');
+        if (!base) continue;
+        ins.run(recipeId, base);
+        rows++;
+      }
+    }
+    // 一条有效 LoRA 都没有的配方:旧口径直接记 0,不进查询(否则 need_n=0 会让它命中全库)
+    if (rows === 0) return out;
+
+    const found = this.db
+      .prepare(
+        `SELECT t.recipe_id AS recipe_id, COUNT(*) AS c FROM (
+           SELECT n.recipe_id AS recipe_id, m.image_id AS image_id, COUNT(*) AS hit,
+                  (SELECT COUNT(*) FROM need n2 WHERE n2.recipe_id = n.recipe_id) AS need_n
+           FROM need n JOIN (SELECT DISTINCT image_id, base_name AS base FROM lora_refs WHERE base_name IS NOT NULL) m
+             ON m.base = n.base
+           GROUP BY n.recipe_id, m.image_id
+         ) t WHERE t.hit = t.need_n GROUP BY t.recipe_id`
+      )
+      .all() as Array<{ recipe_id: string; c: number }>;
+    for (const r of found) out.set(String(r.recipe_id), Number(r.c));
+    return out;
+  }
 
   /**
    * 提示词**完全相同**的图 id(精确模式)。
@@ -1093,7 +1269,16 @@ export class AssetDb {
     return out;
   }
 
-  getStats(rootId?: number): Record<string, unknown> {
+  /**
+   * 库统计。
+   *
+   * `opts.tops` 默认 **true**(CLI `-stats` 要用 topSamplers/topLoras);
+   * 桌面 UI 每次扫描/刷新都会拉一次这个接口,而它只用 totalImages/totalBytes/topModels,
+   * 于是 IPC 侧显式传 `{ tops: false }` —— 跳过最贵的那条
+   * `GROUP BY lora_refs.name`(13 万行,实测 **1.2 秒**,占 getStats 总耗时的绝大部分)。
+   */
+  getStats(rootId?: number, opts?: { tops?: boolean }): Record<string, unknown> {
+    const withTops = opts?.tops !== false;
     const w = rootId === undefined ? '' : 'WHERE root_id = ?';
     const p = rootId === undefined ? [] : [rootId];
 
@@ -1113,14 +1298,16 @@ export class AssetDb {
         )
         .all(...p, limit) as Array<{ name: string; count: number }>;
 
-    const topLoras = this.db
-      .prepare(
-        `SELECT lr.name AS name, COUNT(*) AS count
-         FROM lora_refs lr JOIN images i ON i.id = lr.image_id
-         ${rootId === undefined ? '' : 'WHERE i.root_id = ?'}
-         GROUP BY lr.name ORDER BY count DESC LIMIT 20`
-      )
-      .all(...p) as Array<{ name: string; count: number }>;
+    const topLoras = withTops
+      ? (this.db
+          .prepare(
+            `SELECT lr.name AS name, COUNT(*) AS count
+             FROM lora_refs lr JOIN images i ON i.id = lr.image_id
+             ${rootId === undefined ? '' : 'WHERE i.root_id = ?'}
+             GROUP BY lr.name ORDER BY count DESC LIMIT 20`
+          )
+          .all(...p) as Array<{ name: string; count: number }>)
+      : [];
 
     const span = this.db
       .prepare(`SELECT MIN(file_mtime) AS a, MAX(file_mtime) AS b FROM images ${w}`).get(...p) as { a: number | null; b: number | null };
@@ -1130,7 +1317,7 @@ export class AssetDb {
       totalBytes: total.b,
       bySource,
       topModels: top('model_name'),
-      topSamplers: top('sampler_name'),
+      topSamplers: withTops ? top('sampler_name') : [],
       topLoras,
       earliest: span.a,
       latest: span.b,

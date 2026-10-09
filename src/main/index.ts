@@ -21,7 +21,7 @@ import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { AssetDb } from './db.ts';
-import { scanLibrary, THUMB_DIR_NAME, META_VERSION, type ScanProgress } from './indexer.ts';
+import { scanLibrary, scanPaths, classifyWatchPaths, THUMB_DIR_NAME, META_VERSION, type ScanProgress } from './indexer.ts';
 import { fingerprintOf, normalizeLoraName, type RecipeRecord } from '../shared/recipes.ts';
 import { normalizePrompt, promptTokens, promptTokenSet, similarityToTokenSet, SIMILAR_THRESHOLD } from '../shared/prompts.ts';
 import { buildCompareRows, type CompareRow } from '../shared/compare.ts';
@@ -289,10 +289,34 @@ let quitting = false;
  * 配方命中统计(getRecipeStats)的缓存。
  * 失效条件:
  *  1. 配方目录签名变化(文件名 + mtime —— 应用内保存/删除与外部工具改文件都能捕获);
- *  2. 图库索引代际变化(扫描结束且本轮有新入库/清理 → indexGeneration 递增)。
+ *  2. 图库索引代际变化(扫描/定点入库结束且本轮有新入库/清理 → indexGeneration 递增)。
+ *
+ * 持久化:结果按 { sig, gen, stats } 写进库里的 kv。重启后先读 kv,
+ * 签名与代际一致就直接用 —— 应用重启后第一次打开配方小节是零查询的。
+ * 代际基线跟着恢复(见 loadRecipeStatsCache):否则每次重启 gen 都从 0 起算,
+ * 缓存永远对不上,持久化就白做了。
  */
 let recipeStatsCache: { sig: string; gen: number; stats: RecipeStat[] } | null = null;
 let indexGeneration = 0;
+
+/** 启动时恢复配方统计缓存(含索引代际基线) */
+function loadRecipeStatsCache(): void {
+  let raw: string | null = null;
+  try {
+    raw = db.getKv('recipe_stats');
+  } catch {
+    return;
+  }
+  if (!raw) return;
+  try {
+    const v = JSON.parse(raw) as { sig?: unknown; gen?: unknown; stats?: unknown };
+    if (typeof v.sig !== 'string' || typeof v.gen !== 'number' || !Array.isArray(v.stats)) return;
+    recipeStatsCache = { sig: v.sig, gen: v.gen, stats: v.stats as RecipeStat[] };
+    indexGeneration = v.gen;
+  } catch {
+    /* 缓存格式不对(手工改过 / 旧版本写的)就当没有,下次请求重算 */
+  }
+}
 
 /** 配方目录签名:文件名 + mtime。外部工具直接改 .recipe.json 也会让它变。 */
 function recipesDirSignature(): string {
@@ -341,10 +365,14 @@ function applyWindowChrome(): void {
 
 // ---------------------------------------------------------------- 自动入库
 //
-// 图库目录里新增/删除/改名 PNG 后自动增量扫描,不用用户手动点扫描。
-// 两个关键点:
+// 图库目录里新增/删除/改名 PNG 后自动入库,不用用户手动点扫描。三个关键点:
 //   1. 忽略自己的缩略图缓存目录(.comfy-thumbs),否则一边看图一边触发扫描;
-//   2. 去抖 1.5s —— 复制一批图进来只扫一次。
+//   2. 去抖 500ms —— 复制一批图进来只处理一次;
+//   3. **定点入库**:把发生变化的相对路径攒起来,只处理这几个文件,
+//      不再为此重新遍历整个图库(1.8 万张的真实库全量对账要 2 秒多,
+//      出图目录一直在写新图,以前就是"每来一张新图卡一下"的来源)。
+//      拿不准的事件(整批只剩目录名、非图片文件、文件名缺失)才退回全量对账 —— 正确性优先,
+//      判定规则见 indexer.ts 的 classifyWatchPaths。
 let rootWatchers: fs.FSWatcher[] = [];
 /**
  * 每个图库根的递归文件监听是否健康。
@@ -354,18 +382,126 @@ let rootWatchers: fs.FSWatcher[] = [];
  * 监听缺失或报错 → 退回全量对账,保证不会漏掉变化。
  */
 const watchHealthy = new Map<number, boolean>();
-const pendingRootIds = new Set<number>();
+/** rootId -> 待处理的相对路径(监听事件攒到一起去抖处理) */
+const pendingPaths = new Map<number, Set<string>>();
+/** 拿不准、需要整库对账的 root(文件名缺失的事件) */
+const pendingFullRoots = new Set<number>();
 let watchTimer: NodeJS.Timeout | null = null;
 
-function scheduleAutoScan(rootId: number): void {
-  pendingRootIds.add(rootId);
+/** 去抖窗口:等一批"刚写进来的图"落盘完再处理,避免解析到半写状态的文件 */
+const WATCH_DEBOUNCE_MS = 500;
+/** 有扫描在跑时的重试间隔(事件不丢,只是往后挪) */
+const WATCH_RETRY_MS = 500;
+
+/** 记下一个监听事件;rel === null 表示拿不到文件名(只能整库对账) */
+function recordWatchEvent(rootId: number, rel: string | null): void {
+  if (rel === null) {
+    pendingFullRoots.add(rootId);
+  } else {
+    let set = pendingPaths.get(rootId);
+    if (!set) pendingPaths.set(rootId, (set = new Set()));
+    set.add(rel);
+  }
+  armWatchFlush(WATCH_DEBOUNCE_MS);
+}
+
+/** 重启去抖定时器(重复事件会把到点时间往后推) */
+function armWatchFlush(ms: number): void {
   if (watchTimer) clearTimeout(watchTimer);
   watchTimer = setTimeout(() => {
     watchTimer = null;
-    const ids = [...pendingRootIds];
-    pendingRootIds.clear();
-    if (ids.length) void runScan({ rootIds: ids });
-  }, 1500);
+    flushWatchEvents();
+  }, ms);
+}
+
+/**
+ * 去抖到点:能定点的定点,拿不准的退回全量对账。
+ *
+ * "能不能定点"的规则在 `indexer.ts` 的 `classifyWatchPaths`(那里可以脱离
+ * Electron 用真实目录做行为验证):整批都能定点就只处理这几个路径,
+ * 只要有一个拿不准(目录事件、非图片文件、来历不明的路径)就整库对账 —— 正确性优先。
+ */
+function flushWatchEvents(): void {
+  // 退出过程中(数据库已关)还可能有一次到点的定时器,别让它抛未捕获异常
+  try {
+    if (scanAbort) {
+      // 有扫描在跑时 runScan 会直接返回(事件会被吞掉),所以先攒着,稍后再试
+      armWatchFlush(WATCH_RETRY_MS);
+      return;
+    }
+    const batches = [...pendingPaths];
+    pendingPaths.clear();
+    const fullRoots = new Set(pendingFullRoots);
+    pendingFullRoots.clear();
+    if (!batches.length && !fullRoots.size) return;
+
+    const rootsById = new Map(
+      (db.listRoots() as Array<{ id: number; path: string }>).map((r) => [r.id, r])
+    );
+    const pinpoint: Array<{ rootId: number; absPaths: string[]; removedDirs: string[] }> = [];
+    for (const [rootId, rels] of batches) {
+      const root = rootsById.get(rootId);
+      if (!root) continue; // 图库已经被删掉
+      const plan = classifyWatchPaths(
+        root.path,
+        rels,
+        (rel) => db.getImageByRelPath(root.id, rel) !== null,
+        /**
+         * 盘上已不在的路径:判断索引里这个目录下还有没有行、这些行是不是真的都没了。
+         * 抽样(最多 3 条)即可 —— 目录被删时它的所有子路径都该不在盘上;
+         * 若抽样里还有存在的,说明是"目录被改名/搬走"(行还指着老路径),交给全量对账。
+         */
+        (rel) => {
+          const sample = db.indexedRelPathsUnder(root.id, rel, 3);
+          if (sample.length === 0) return 'none';
+          const anyAlive = sample.some((rp) => fs.existsSync(path.join(root.path, rp)));
+          return anyAlive ? 'alive' : 'stale';
+        }
+      );
+      if (plan === null) fullRoots.add(rootId);
+      else if (plan.paths.length || plan.removedDirs.length) {
+        pinpoint.push({ rootId: root.id, absPaths: plan.paths, removedDirs: plan.removedDirs });
+      }
+    }
+    if (!pinpoint.length && !fullRoots.size) return;
+
+    /**
+     * 同一个去抖窗口里可能有多个图库同时有变化,而 `node:sqlite` 是**一个连接**:
+     * 两个 scanPaths 并发跑会让各自的 BEGIN/COMMIT 交错(报 "cannot start a
+     * transaction within a transaction")。所以这里串行执行,一个图库一个图库来。
+     */
+    void (async () => {
+      for (const t of pinpoint) await runPathScan(t.rootId, t.absPaths, t.removedDirs);
+      if (fullRoots.size) await runScan({ rootIds: [...fullRoots] });
+    })();
+  } catch (e) {
+    console.warn('[watch] 处理监听事件失败:', e instanceof Error ? e.message : e);
+  }
+}
+
+/**
+ * 定点入库 + 兜底:任何异常(解析环境异常、数据库错误)都退回全量对账。
+ * 只在真有变化时递增索引代际(与全量对账同一口径)。
+ */
+async function runPathScan(rootId: number, absPaths: string[], removedDirs: string[] = []): Promise<void> {
+  scanAbort = new AbortController();
+  let failed = false;
+  try {
+    const res = await scanPaths(db, {
+      rootId,
+      absPaths,
+      removedDirs,
+      signal: scanAbort.signal,
+      onProgress: broadcastProgress,
+    });
+    if (res.indexed !== 0 || res.removed !== 0) indexGeneration++;
+  } catch (e) {
+    failed = true;
+    console.warn('[watch] 定点入库失败,退回全量对账:', e instanceof Error ? e.message : e);
+  } finally {
+    scanAbort = null;
+  }
+  if (failed) await runScan({ rootIds: [rootId] });
 }
 
 /** 图库根变化(增删/启停)后重建监听 */
@@ -380,12 +516,13 @@ function syncRootWatchers(): void {
     if (root.enabled !== 1) continue;
     try {
       const watcher = fs.watch(root.path, { recursive: true }, (_event, filename) => {
-        if (!filename) return;
-        const rel = String(filename);
-        // 只忽略自己的缩略图缓存;其余事件(含删除目录、改名)都要触发扫描 ——
+        // 拿不到文件名 = 不知道变了哪个路径(Windows 上事件缓冲区溢出等),
+        // 只能让这个图库整库对账,不能猜。
+        const rel = filename === null || filename === undefined ? null : String(filename);
+        // 只忽略自己的缩略图缓存;其余事件(含删除目录、改名)都要处理 ——
         // 删目录时 Windows 只报目录名,按 .png 过滤会漏掉"图片被删"这件事。
-        if (rel.split(/[\\/]/).includes(THUMB_DIRNAME)) return;
-        scheduleAutoScan(root.id);
+        if (rel !== null && rel.split(/[\\/]/).includes(THUMB_DIRNAME)) return;
+        recordWatchEvent(root.id, rel);
       });
       watcher.on('error', () => {
         // 监听断了(盘被拔掉、句柄失效)—— 之后靠全量对账兜底
@@ -1099,7 +1236,9 @@ function registerIpc(): void {
   });
   handle('getImagesByIds', (ids: number[]) => db.getImagesByIds(ids));
   handle('getFolderTree', (rootId?: number) => db.getFolderTree(rootId));
-  handle('getStats', (rootId?: number) => db.getStats(rootId));
+  // 桌面 UI 只用 totalImages/totalBytes/topModels;topSamplers/topLoras 是 CLI 统计用的,
+  // 其中 topLoras 要扫 13 万行 lora_refs(实测 1.2 秒),所以这里显式跳过(includesTops=false)。
+  handle('getStats', (rootId?: number) => db.getStats(rootId, { tops: false }));
   handle('getFilterOptions', () => db.getFilterOptions());
 
   // ---- 用户自定义分类(不移动文件,只是索引层的集合归属)
@@ -1521,8 +1660,14 @@ function registerIpc(): void {
 
   /**
    * 每个配方当前命中的图片数(左侧「配方」小节的数量胶囊)。
-   * 每个配方跑一次 COUNT 查询(子集匹配口径,与按配方筛选走同一WHERE);
-   * 结果带缓存:配方目录签名(文件名+mtime)或索引代际(扫描有实际变化)变了才重算。
+   *
+   * v0.8 起改成 `db.recipeCounts(...)`:**一条**查询算完全部配方(走 lora_refs.base_name 索引)。
+   * 以前是"每配方一条 COUNT 查询 + 每条 LoRA 一个 cam_lora_base(lr.name) = ? 的 EXISTS",
+   * 1.8 万张图的真实库实测约 3 秒纯同步 SQL —— 主进程整段冻结,
+   * 而每次有新图入库都会让缓存失效,于是"每来一批新图卡一次"。
+   *
+   * 结果带缓存:配方目录签名(文件名+mtime)或索引代际(扫描/定点入库有实际变化)变了才重算,
+   * 并把结果写进 kv —— 重启后签名与代际一致就直接复用,不再算一遍。
    */
   handle('getRecipeStats', () => {
     const sig = recipesDirSignature();
@@ -1530,13 +1675,22 @@ function registerIpc(): void {
       return recipeStatsCache.stats;
     }
     const t0 = Date.now();
-    const stats: RecipeStat[] = readAllRecipes().map((rec) => {
-      const names = recipeMatchNames(rec);
-      const count = names.length === 0 ? 0 : db.queryImages({ recipeLoraNames: names, limit: 1 }).total;
-      return { id: rec.id, title: rec.title, count };
-    });
+    const recipes = readAllRecipes();
+    const counts = db.recipeCounts(
+      recipes.map((rec) => ({ recipeId: rec.id, names: recipeMatchNames(rec) }))
+    );
+    const stats: RecipeStat[] = recipes.map((rec) => ({
+      id: rec.id,
+      title: rec.title,
+      count: counts.get(rec.id) ?? 0, // 查询里没出现 = 0 命中(含"没有有效 LoRA"的配方)
+    }));
     console.log(`[recipes] 配方命中统计:${stats.length} 个配方,${Date.now() - t0}ms`);
     recipeStatsCache = { sig, gen: indexGeneration, stats };
+    try {
+      db.setKv('recipe_stats', JSON.stringify({ sig, gen: indexGeneration, stats }));
+    } catch {
+      /* 缓存写不下去不影响返回,下次请求重算就是了 */
+    }
     return stats;
   });
 
@@ -1837,6 +1991,8 @@ if (!app.requestSingleInstanceLock()) {
     ensureDirs();
     db = new AssetDb(DB_FILE);
     mergeLegacyRoots();
+    // 配方命中统计的持久化缓存:签名/代际一致就不必在打开配方小节时再算一遍
+    loadRecipeStatsCache();
     syncRootWatchers();
     registerThumbProtocol();
     registerBackgroundProtocol();
@@ -1902,6 +2058,16 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', () => {
     quitting = true;
     destroyPetWindow();
+    // 先停掉文件监听与待处理的去抖定时器,再关库 ——
+    // 否则到点的定时器会在"库已关"之后去 listRoots/写库
+    if (watchTimer) {
+      clearTimeout(watchTimer);
+      watchTimer = null;
+    }
+    for (const w of rootWatchers) {
+      try { w.close(); } catch { /* 已关闭 */ }
+    }
+    rootWatchers = [];
     scanAbort?.abort();
     db?.close();
   });

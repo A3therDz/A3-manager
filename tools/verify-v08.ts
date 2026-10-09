@@ -12,15 +12,22 @@
  *      子目录规范化、null 权重、recipeNoMatch、与 starredOnly 组合。
  *   D. 配方比对(v0.8 追加):提示词归一化 / 相似度阈值 / 分列与 LoRA 差异分组,
  *      以及数据层 peerIdsByPrompt / candidateIdsByTokens 的召回口径(内存库)。
+ *   E. 新图入库的性能路径(行为):老库 lora_refs 补 base_name 列 + 回填 + 建索引、
+ *      recipeCounts 与旧逐条 COUNT 口径等价、scanPaths 定点入库(重复跑不重解析、
+ *      删除定点清理)、定点入库后目录树签名仍有效(全量对账能走快速通道)。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
+import zlib from 'node:zlib';
 import { normalizeLoraName, fingerprintOf, matchRecipes, type RecipeRecord } from '../src/shared/recipes.ts';
 import { normalizePrompt, promptTokens, promptSimilarity, SIMILAR_THRESHOLD } from '../src/shared/prompts.ts';
 import { buildCompareRows, groupCompareRows, UNMATCHED_TITLE, type CompareBasic } from '../src/shared/compare.ts';
 import { AssetDb } from '../src/main/db.ts';
+import { scanLibrary, scanPaths, classifyWatchPaths } from '../src/main/indexer.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT = path.resolve(__dirname, '..');
@@ -546,6 +553,503 @@ console.log('\n=== D4) 按提示词找同类图(内存库行为) ===');
   else bad('getCompareBasics 的 loras 应为空数组');
 
   pdb.close();
+}
+
+console.log('\n=== E) 新图入库的性能路径(行为) ===');
+
+/** 最小合法 PNG 生成:IHDR(2×2 真彩) + 可选 tEXt 块 + IDAT + IEND */
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const crcTable = (() => {
+  const t = new Int32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c;
+  }
+  return t;
+})();
+function crc32(buf: Buffer): number {
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+function pngChunk(type: string, data: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const t = Buffer.from(type, 'latin1');
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([t, data])), 0);
+  return Buffer.concat([len, t, data, crc]);
+}
+function makePng(text?: Record<string, string>): Buffer {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(2, 0);
+  ihdr.writeUInt32BE(2, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type = truecolor
+  const parts = [PNG_SIG, pngChunk('IHDR', ihdr)];
+  for (const [k, v] of Object.entries(text ?? {})) {
+    parts.push(
+      pngChunk('tEXt', Buffer.concat([Buffer.from(k, 'latin1'), Buffer.from([0]), Buffer.from(v, 'latin1')]))
+    );
+  }
+  parts.push(pngChunk('IDAT', zlib.deflateSync(Buffer.alloc(2 * (1 + 2 * 3)))), pngChunk('IEND', Buffer.alloc(0)));
+  return Buffer.concat(parts);
+}
+/** ComfyUI 节点图文本:一条 LoraLoader(名字故意带子目录 + 扩展名) */
+const graphWithLora = (loraName: string) =>
+  JSON.stringify({
+    '1': { class_type: 'LoraLoader', inputs: { lora_name: loraName, strength_model: 0.6, strength_clip: 0.6 } },
+  });
+
+// ---- E1) 老库迁移:lora_refs 没有 base_name 列 → 打开时补列 + 按 normalizeLoraName 回填 + 建索引
+
+/**
+ * 造一个"老库":
+ *  - 先用 AssetDb 建出完整表结构(images / roots / kv…),再把 lora_refs 换成老形态
+ *    (v0.7 及以前:没有 base_name 列,也不带外键);
+ *  - `withColumn: true` 用来模拟"迁移被打断"的库(列加上了但值全是 NULL)。
+ */
+function seedLegacyDb(
+  file: string,
+  loras: Array<{ name: string; strength: number }>,
+  opts: { withColumn: boolean }
+): void {
+  new AssetDb(file).close();
+  const raw = new DatabaseSync(file);
+  raw.exec('DROP TABLE lora_refs');
+  raw.exec(
+    opts.withColumn
+      ? `CREATE TABLE lora_refs (
+           image_id INTEGER NOT NULL, name TEXT NOT NULL, base_name TEXT, strength REAL,
+           PRIMARY KEY (image_id, name))`
+      : `CREATE TABLE lora_refs (
+           image_id INTEGER NOT NULL, name TEXT NOT NULL, strength REAL,
+           PRIMARY KEY (image_id, name))`
+  );
+  raw.exec(`INSERT INTO roots (id, path, label, enabled, added_at) VALUES (1, 'C:/old-lib', 'old', 1, 0)`);
+  raw.exec(
+    `INSERT INTO images (id, root_id, abs_path, rel_path, rel_dir, file_name, file_size, file_mtime,
+                         source, meta_json, indexed_at)
+     VALUES (1, 1, 'C:/old-lib/1.png', '1.png', '', '1.png', 1, 1, 'comfyui', '{}', 0)`
+  );
+  const ins = opts.withColumn
+    ? raw.prepare('INSERT INTO lora_refs (image_id, name, base_name, strength) VALUES (?,?,?,?)')
+    : raw.prepare('INSERT INTO lora_refs (image_id, name, strength) VALUES (?,?,?)');
+  for (const l of loras) {
+    if (opts.withColumn) ins.run(1, l.name, null, l.strength);
+    else ins.run(1, l.name, l.strength);
+  }
+  raw.close();
+}
+
+{
+  const tmp = fs.mkdtempSync(path.join(tmpdir(), 'a3-v08-mig-'));
+  const dbFile = path.join(tmp, 'old.db');
+  seedLegacyDb(dbFile, [
+    { name: '画风类/style_a.safetensors', strength: 0.6 },
+    { name: 'sub/dir/style_b', strength: 0.4 },
+    { name: '  MiXeD_Case_LoRA.SAFETENSORS  ', strength: 1 },
+  ], { withColumn: false });
+
+  const odb = new AssetDb(dbFile);
+  const cols = (odb.db.prepare('PRAGMA table_info(lora_refs)').all() as Array<{ name: string }>).map((c) => c.name);
+  if (cols.includes('base_name')) good('老库打开后 lora_refs 补上了 base_name 列');
+  else bad(`老库迁移没补上 base_name 列,现有列:${cols.join(',')}`);
+
+  const rows = odb.db
+    .prepare('SELECT name, base_name FROM lora_refs ORDER BY name')
+    .all() as Array<{ name: string; base_name: string | null }>;
+  const badRows = rows.filter((r) => r.base_name === null || r.base_name !== normalizeLoraName(r.name));
+  if (rows.length === 3 && badRows.length === 0)
+    good(`老数据按 normalizeLoraName 回填(含子目录 / 扩展名 / 大小写):${rows.map((r) => r.base_name).join(', ')}`);
+  else bad(`回填不对:${JSON.stringify(rows)}`);
+
+  const idx = odb.db
+    .prepare(`SELECT name, sql FROM sqlite_master WHERE type='index' AND name='idx_lora_refs_base'`)
+    .get() as { name: string; sql: string } | undefined;
+  if (idx) good('迁移顺带建了 idx_lora_refs_base 索引');
+  else bad('迁移没有建 idx_lora_refs_base 索引');
+  // 必须是 (base_name, image_id) 复合索引:只建 (base_name) 时 SQLite 会走
+  // "按名字找行再回表比对 image_id"的计划,真实库上一次配方筛选从 148ms 退化到 4920ms
+  if (idx && /image_id/.test(idx.sql))
+    good(`索引形状正确(复合索引,EXISTS 能一次定位):${idx.sql.replace(/\s+/g, ' ')}`);
+  else bad(`索引形状不对(缺 image_id),配方筛选会退化:${idx?.sql}`);
+
+  // 回填后按配方筛选走索引也能命中(不再是 cam_lora_base(name) = ? 的逐行函数调用)
+  const hit = odb.queryImages({ recipeLoraNames: ['画风类/style_a'], limit: 10 });
+  if (hit.ids.join(',') === '1') good('迁移后配方筛选能命中老数据(base_name 列可用)');
+  else bad(`迁移后配方筛选期望命中 image_id=1,得到 ${JSON.stringify(hit.ids)}`);
+
+  // 库里若留着"只有 base_name 一列"的旧索引(形状不对会让筛选退化),打开时要被换掉
+  odb.db.exec('DROP INDEX idx_lora_refs_base');
+  odb.db.exec('CREATE INDEX idx_lora_refs_base ON lora_refs(base_name)');
+  odb.close();
+  const odb2 = new AssetDb(dbFile);
+  const idx2 = odb2.db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_lora_refs_base'`)
+    .get() as { sql: string } | undefined;
+  if (idx2 && /image_id/.test(idx2.sql)) good('形状不对的旧索引(只有 base_name)在打开时被换成复合索引');
+  else bad(`形状不对的旧索引没被修正:${idx2?.sql}`);
+  odb2.close();
+
+  // 迁移被打断过的库(列加上了、值是 NULL):打开时必须补回填,否则配方筛选一张都命中不了
+  const halfFile = path.join(tmp, 'half.db');
+  seedLegacyDb(halfFile, [{ name: 'sub/style_c.safetensors', strength: 0.5 }], { withColumn: true });
+  const hdb = new AssetDb(halfFile);
+  const hrow = hdb.db.prepare('SELECT name, base_name FROM lora_refs').get() as {
+    name: string; base_name: string | null;
+  };
+  if (hrow.base_name === 'style_c') good('迁移被打断的库(列在但值是 NULL)在打开时被补回填');
+  else bad(`被打断的迁移没有被补上:${JSON.stringify(hrow)}`);
+  hdb.close();
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// ---- E2) 统计等价:recipeCounts(一次查询)与旧口径(逐配方 queryImages().total)逐条相等
+{
+  const rdb = new AssetDb(':memory:');
+  const rootId = rdb.addRoot('C:/recipe-counts', 'recipe-counts');
+  let seq = 0;
+  const addImg = (loras: Array<{ name: string; strength: number | null }>): number => {
+    seq++;
+    return rdb.upsertImage({
+      rootId,
+      absPath: `C:/recipe-counts/r${seq}.png`,
+      relPath: `r${seq}.png`,
+      relDir: '',
+      fileName: `r${seq}.png`,
+      fileSize: 1000 + seq,
+      fileMtime: 1700000000000 + seq,
+      width: 1024,
+      height: 1024,
+      source: 'comfyui',
+      modelName: null,
+      samplerName: null,
+      scheduler: null,
+      steps: null,
+      cfg: null,
+      seed: null,
+      posPrompt: null,
+      negPrompt: null,
+      promptLen: 0,
+      loraCount: loras.length,
+      nodeCount: 0,
+      metaJson: '{}',
+      rawJson: null,
+      loras,
+      searchText: `r${seq}`,
+    }).id;
+  };
+  addImg([{ name: 'style_a', strength: 0.6 }, { name: 'style_b', strength: 0.4 }]);
+  addImg([{ name: 'style_a', strength: 0.6 }]);
+  addImg([{ name: 'sub/dir/style_a', strength: 0.62 }, { name: 'style_b', strength: 0.4 }]);
+  addImg([{ name: 'style_a', strength: null }, { name: 'style_b', strength: null }]);
+  addImg([{ name: '画风类/style_a.safetensors', strength: 1 }]);
+  addImg([{ name: 'nope_lora', strength: 1 }]);
+
+  const DEFS = [
+    { id: 'both', names: ['style_a', 'style_b'], expect: 3 },
+    { id: 'one', names: ['style_a'], expect: 5 },
+    // 与 both 同一集合,但配方侧写成"子目录 + 扩展名":规范化后必须相等
+    { id: 'mixed-form', names: ['画风类/style_a.safetensors', 'sub/dir/style_b'], expect: 3 },
+    { id: 'missing', names: ['never_used_lora'], expect: 0 },
+    { id: 'dup', names: ['style_a', 'style_a'], expect: 5 },
+    { id: 'empty', names: [], expect: 0 },
+  ];
+  const counts = rdb.recipeCounts(DEFS.map((d) => ({ recipeId: d.id, names: d.names })));
+
+  // 与旧口径逐条比:旧口径 = 主进程 getRecipeStats 的写法
+  for (const d of DEFS) {
+    const oldCount = d.names.length === 0 ? 0 : rdb.queryImages({ recipeLoraNames: d.names, limit: 1 }).total;
+    const newCount = counts.get(d.id) ?? 0;
+    if (oldCount === newCount) good(`配方 ${d.id}:新 recipeCounts 与旧逐条 COUNT 口径一致(${newCount})`);
+    else bad(`配方 ${d.id} 新旧口径不一致:旧 ${oldCount} / 新 ${newCount}`);
+  }
+  const wrong = DEFS.filter((d) => (counts.get(d.id) ?? 0) !== d.expect);
+  if (wrong.length === 0) good(`命中数与预期逐条相符(含"没有有效 LoRA"的配方记 0):${DEFS.map((d) => d.id + '=' + (counts.get(d.id) ?? 0)).join(', ')}`);
+  else bad(`命中数与预期不符:${wrong.map((d) => `${d.id} 期望 ${d.expect} 得到 ${counts.get(d.id) ?? 0}`).join('; ')}`);
+  if (!counts.has('missing') && !counts.has('empty'))
+    good('没有命中的配方不进 Map(调用方取 ?? 0),不会误记成"全库张数"');
+  else bad(`不该出现的配方进了 Map:${[...counts.keys()].join(',')}`);
+  if (rdb.recipeCounts([]).size === 0) good('空需求集返回空 Map(不会去查库)');
+  else bad('空需求集应当返回空 Map');
+  rdb.close();
+}
+
+// ---- E3) 定点入库:只处理变化的路径,指纹没变不重复解析,删掉的文件被定点清理
+{
+  const tmp = fs.mkdtempSync(path.join(tmpdir(), 'a3-v08-pin-'));
+  const dbFile = path.join(tmp, 'pin.db');
+  const lib = path.join(tmp, 'lib');
+  fs.mkdirSync(lib, { recursive: true });
+  const pa = path.join(lib, 'a.png');
+  const pb = path.join(lib, 'b.png');
+  const pc = path.join(lib, 'c.png');
+  // a.png 带一条 LoRA(名字带子目录 + 扩展名),验证入库时把 base_name 规范化写好了
+  fs.writeFileSync(pa, makePng({ prompt: graphWithLora('sub/style_a.safetensors') }));
+  fs.writeFileSync(pb, makePng());
+  fs.writeFileSync(pc, makePng());
+
+  const pdb = new AssetDb(dbFile);
+  const rootId = pdb.addRoot(lib, 'pin-lib');
+  const all = [pa, pb, pc];
+
+  const r1 = await scanPaths(pdb, { rootId, absPaths: all });
+  if (r1.indexed === 3 && r1.removed === 0 && r1.scanned === 3 && pdb.count() === 3)
+    good(`scanPaths 定点入库 3 张(scanned=${r1.scanned} indexed=${r1.indexed} removed=${r1.removed})`);
+  else bad(`定点入库期望 3 张,得到 ${JSON.stringify(r1)} / 库内 ${pdb.count()}`);
+
+  const lr = pdb.db.prepare('SELECT image_id, name, base_name FROM lora_refs').all() as Array<{
+    image_id: number; name: string; base_name: string | null;
+  }>;
+  if (lr.length === 1 && lr[0].name === 'sub/style_a.safetensors' && lr[0].base_name === 'style_a')
+    good('入库时同时写了规范化 base_name(子目录 / 扩展名都剥掉):sub/style_a.safetensors → style_a');
+  else bad(`lora_refs 的 base_name 不对:${JSON.stringify(lr)}`);
+
+  const r2 = await scanPaths(pdb, { rootId, absPaths: all });
+  if (r2.indexed === 0 && r2.removed === 0 && r2.scanned === 3)
+    good('同一批文件再跑一次:indexed=0(mtime/size 指纹没变就不重复解析)');
+  else bad(`重复定点入库不该重新解析,得到 ${JSON.stringify(r2)}`);
+
+  // 内容变了(mtime/size 变)→ 只有这一个文件被重新解析
+  fs.writeFileSync(pb, makePng({ prompt: graphWithLora('another_lora') }));
+  const r2b = await scanPaths(pdb, { rootId, absPaths: [pb] });
+  if (r2b.indexed === 1 && pdb.count() === 3)
+    good('文件变了(指纹不同)→ 重新解析入库,且没有多出索引行');
+  else bad(`改动文件后期望 indexed=1,得到 ${JSON.stringify(r2b)} / 库内 ${pdb.count()}`);
+
+  // 删掉一张:a.png 与它的 LoRA 行 / FTS 行都要清掉
+  fs.rmSync(pa);
+  const r3 = await scanPaths(pdb, { rootId, absPaths: [pa] });
+  const ftsLeft = (pdb.db.prepare('SELECT COUNT(*) AS c FROM images_fts').get() as { c: number }).c;
+  const loraLeft = pdb.db.prepare('SELECT name, base_name FROM lora_refs').all() as Array<{
+    name: string; base_name: string | null;
+  }>;
+  if (r3.removed === 1 && r3.indexed === 0 && pdb.count() === 2 && !pdb.getImageByRelPath(rootId, 'a.png'))
+    good('盘上删掉的文件被定点清理(removed=1,索引里只剩 2 张,查不到 a.png)');
+  else bad(`删除期望 removed=1 且只剩 2 张,得到 ${JSON.stringify(r3)} / 库内 ${pdb.count()}`);
+  // 剩下的一行属于 b.png(改过内容后重新解析,LoRA 变成 another_lora);
+  // a.png 那条 sub/style_a 必须随删图一起级联清掉。
+  if (ftsLeft === 2 && loraLeft.length === 1 && loraLeft[0].base_name === 'another_lora')
+    good(`被删图的 LoRA 行与 FTS 行一起清掉(fts=${ftsLeft},lora_refs 只剩 b.png 的 ${loraLeft[0].name})`);
+  else bad(`残留脏行:fts=${ftsLeft} lora_refs=${JSON.stringify(loraLeft)}(应分别为 2 / [another_lora])`);
+
+  // 非 .png 与图库之外的路径一律忽略(能不能定点由调用方判定)
+  const r4 = await scanPaths(pdb, { rootId, absPaths: [path.join(lib, 'note.txt'), 'C:/outside/x.png'] });
+  if (r4.scanned === 0 && r4.indexed === 0 && r4.removed === 0 && pdb.count() === 2)
+    good('非 .png / 图库之外的路径被忽略(不会误入库、不会误删)');
+  else bad(`不该处理这些路径,得到 ${JSON.stringify(r4)}`);
+
+  // ---- E4) 目录树签名被维护:下次全量对账仍能走"签名一致 → 整轮跳过"的快速通道
+  const sig = pdb.getTreeSignature(rootId);
+  if (sig && sig.count === pdb.countImages(rootId) && sig.count === 2)
+    good(`定点入库维护了目录树签名:tree_sig 仍在、count=${sig.count} 与实际索引数一致(没被删/没归零)`);
+  else bad(`目录树签名不对:${JSON.stringify(sig)} / 索引数 ${pdb.countImages(rootId)}`);
+  if (sig && sig.rootMtime > 0) good('签名的 rootMtime 取自当前图库根目录(不是 0)');
+  else bad('签名的 rootMtime 应为图库根目录的 mtime');
+
+  const full = await scanLibrary(pdb, { rootIds: [rootId] });
+  if (full.skippedRoots === 1 && full.indexed === 0 && full.removed === 0)
+    good('定点入库之后,下一次全量对账走签名快速通道整轮跳过(不必再遍历 + 逐个 stat)');
+  else bad(`期望签名一致走快速通道(skippedRoots=1),得到 skippedRoots=${full.skippedRoots} indexed=${full.indexed} removed=${full.removed}`);
+
+  pdb.close();
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// ---- E5) 监听事件的定点判定(classifyWatchPaths):真实目录 + 真实索引
+console.log('\n--- E5) 监听事件判定(能不能定点 / 要不要退回全量) ---');
+{
+  const tmp = fs.mkdtempSync(path.join(tmpdir(), 'a3-v08-watch-'));
+  const dbFile = path.join(tmp, 'w.db');
+  const lib = path.join(tmp, 'lib');
+  const day = path.join(lib, '2026-10-09');
+  fs.mkdirSync(day, { recursive: true });
+  fs.writeFileSync(path.join(day, 'k1.png'), makePng());
+  fs.writeFileSync(path.join(day, 'k2.png'), makePng());
+  fs.writeFileSync(path.join(lib, 'top.png'), makePng());
+  fs.writeFileSync(path.join(lib, 'note.txt'), 'x');
+
+  const wdb = new AssetDb(dbFile);
+  const rootId = wdb.addRoot(lib, 'watch-lib');
+  // 先把两张子目录里的图 + 根目录里那张入库(等于"应用已经在运行、索引是新鲜的")
+  await scanPaths(wdb, {
+    rootId,
+    absPaths: [path.join(day, 'k1.png'), path.join(day, 'k2.png'), path.join(lib, 'top.png')],
+  });
+  const indexed = (rel: string) => wdb.getImageByRelPath(rootId, rel) !== null;
+  /** 模拟主进程的 probeDir:索引里这个目录下有行吗?抽样的行在盘上还在吗? */
+  const probe = (rel: string): 'none' | 'stale' | 'alive' => {
+    const sample = wdb.indexedRelPathsUnder(rootId, rel, 3);
+    if (sample.length === 0) return 'none';
+    return sample.some((rp) => fs.existsSync(path.join(lib, rp))) ? 'alive' : 'stale';
+  };
+  const cls = (rels: string[]) => classifyWatchPaths(lib, rels, indexed, probe);
+
+  // 1) 目录名事件 + 它下面的文件事件同批到达 —— **Windows 实测就是这么报的**
+  //    (往 output\krea2\<日期>\ 拷 5 张图会额外报 5 次目录名 change);
+  //    目录事件不带"哪个文件变了",这时真正的信息在文件事件里,要能在丢掉目录事件后定点。
+  const c1 = cls([
+    '2026-10-09',
+    path.join('2026-10-09', 'k1.png'),
+    path.join('2026-10-09', 'k2.png'),
+  ]);
+  if (c1 && c1.paths.length === 2 && c1.removedDirs.length === 0 && c1.paths.every((p) => p.toLowerCase().endsWith('.png')))
+    good('目录事件 + 它下面的文件事件同批 → 目录事件被当作冗余丢掉,剩下两个 .png 定点处理');
+  else bad(`同批带目录名时应能定点,得到 ${JSON.stringify(c1)}`);
+
+  // 2) 只有目录事件、而目录还在(整目录被搬进来 / 新目录)→ 必须退回全量
+  if (cls(['2026-10-09']) === null) good('只有"还在的目录"事件 → 拿不准,退回全量对账');
+  else bad('只有目录事件时不该定点');
+
+  // 3) 非图片文件(txt):索引里没有它的行 → 无操作,不用为它跑全量
+  const c3 = cls(['note.txt']);
+  if (c3 && c3.paths.length === 0 && c3.removedDirs.length === 0)
+    good('非图片文件(txt)→ 无操作(索引里没有它的行,不必退回全量)');
+  else bad(`非图片文件不该触发全量,得到 ${JSON.stringify(c3)}`);
+
+  // 4) 盘上已删、索引里有的图 → 定点清理
+  const gone = path.join(day, 'k2.png');
+  fs.rmSync(gone);
+  const c4 = cls([path.join('2026-10-09', 'k2.png')]);
+  if (c4 && c4.paths.length === 1 && c4.paths[0] === gone) good('盘上删掉、索引里存在的 .png → 定点清理');
+  else bad(`已删的索引图应能定点,得到 ${JSON.stringify(c4)}`);
+
+  // 5) 盘上没有、索引里也没有的 .png(拿不准:可能刚建完就被改名)→ 退回全量
+  if (cls(['2026-10-09/ghost.png']) === null) good('盘上没有、索引里也没有的 .png → 退回全量对账');
+  else bad('来历不明的 .png 不该定点');
+
+  // 6) 改名:旧名(已删,索引里有)+ 新名(存在)→ 两个路径一起定点
+  fs.renameSync(path.join(day, 'k1.png'), path.join(day, 'k1-renamed.png'));
+  const c6 = cls([path.join('2026-10-09', 'k1.png'), path.join('2026-10-09', 'k1-renamed.png')]);
+  if (c6 && c6.paths.length === 2) good('改名(旧名 + 新名两个事件)→ 一起定点处理');
+  else bad(`改名应能定点,得到 ${JSON.stringify(c6)}`);
+
+  // 7) 自己的缩略图缓存:整批忽略(返回空计划 = 无事可做,不算"拿不准")
+  const c7 = cls([path.join('.comfy-thumbs', 'top.thumb.png')]);
+  if (c7 && c7.paths.length === 0 && c7.removedDirs.length === 0)
+    good('自己的缩略图缓存路径被忽略(返回空 = 什么都不用做)');
+  else bad(`缩略图缓存路径应被忽略,得到 ${JSON.stringify(c7)}`);
+
+  // 8) 空批次返回空计划(没有要处理的路径)
+  const c8 = cls([]);
+  if (c8 && c8.paths.length === 0 && c8.removedDirs.length === 0) good('空批次返回空计划');
+  else bad('空批次应返回空计划');
+
+  // 9) **整个日期目录被删**(Windows 只报目录名):索引里有它的行、盘上都没了 → 定点清理整目录
+  const dayRows = wdb.queryImages({ relDir: '2026-10-09', relDirRecursive: true, limit: 10 }).total;
+  fs.rmSync(day, { recursive: true, force: true });
+  const c9 = cls(['2026-10-09']);
+  if (c9 && c9.removedDirs.length === 1 && c9.removedDirs[0] === '2026-10-09')
+    good(`整目录被删(索引里原有 ${dayRows} 行)→ 定点清理,不退回全量`);
+  else bad(`整目录被删应定点清理,得到 ${JSON.stringify(c9)}`);
+
+  // 10) 定点清理整目录:行被删掉,并且**签名被作废**(怕那是目录改名,下次启动全量对账收回来)
+  const r10 = await scanPaths(wdb, { rootId, absPaths: [], removedDirs: ['2026-10-09'] });
+  const leftUnder = wdb.queryImages({ relDir: '2026-10-09', relDirRecursive: true, limit: 10 }).total;
+  if (r10.removed > 0 && leftUnder === 0 && wdb.getTreeSignature(rootId) === null)
+    good(`定点清理整目录:removed=${r10.removed}、目录下剩 ${leftUnder} 行、签名已作废(下次启动会全量对账)`);
+  else bad(`定点清理整目录不对:${JSON.stringify(r10)} left=${leftUnder} sig=${JSON.stringify(wdb.getTreeSignature(rootId))}`);
+
+  // 11) 目录被删、但索引里本来就没有它的行 → 无操作(不必全量)
+  fs.rmSync(day, { recursive: true, force: true });
+  const c11 = cls(['2026-10-09']);
+  if (c11 && c11.removedDirs.length === 0 && c11.paths.length === 0) good('目录被删但索引里没有它的行 → 无操作');
+  else bad(`无索引行的目录删除不该有动作,得到 ${JSON.stringify(c11)}`);
+
+  // 12) 真正把判定结果交给 scanPaths:改一张图 → 只有这一张重新解析
+  fs.mkdirSync(day, { recursive: true });
+  fs.writeFileSync(path.join(lib, 'top.png'), makePng({ prompt: graphWithLora('renamed_lora') }));
+  const plan = cls(['top.png']); // 监听事件给的是相对路径
+  const r5 = plan ? await scanPaths(wdb, { rootId, absPaths: plan.paths, removedDirs: plan.removedDirs }) : null;
+  if (r5 && r5.indexed === 1 && r5.scanned === 1) good('判定结果接 scanPaths:改动那张图被重新解析(indexed=1)');
+  else bad(`判定结果接 scanPaths 后期望 indexed=1,得到 ${JSON.stringify(r5)}`);
+
+  wdb.close();
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------- F. 新图入库的读写路径(行为)
+
+console.log('\n--- F) 新图入库的读写路径(默认视图索引 / 库统计的轻重分离) ---');
+{
+  const dbFile = path.join(tmpdir(), `a3-v08-perf-${Date.now()}.db`);
+  const pdb = new AssetDb(dbFile);
+  const rootId = pdb.addRoot(path.join(tmpdir(), 'a3-v08-perf-lib'), 'perf-lib');
+  let seq = 0;
+  const add = (mtime: number, model: string, lora: string) =>
+    pdb.upsertImage({
+      rootId,
+      absPath: `C:/x/perf-${seq}.png`,
+      relPath: `d/perf-${seq}.png`,
+      relDir: 'd',
+      fileName: `perf-${seq}.png`,
+      fileSize: 1024,
+      fileMtime: mtime,
+      width: 1024,
+      height: 1024,
+      source: 'comfyui',
+      modelName: model,
+      samplerName: 'euler',
+      scheduler: null,
+      steps: null,
+      cfg: null,
+      seed: null,
+      posPrompt: 'a cat',
+      negPrompt: null,
+      promptLen: 5,
+      loraCount: 1,
+      nodeCount: 0,
+      metaJson: '{}',
+      rawJson: null,
+      loras: [{ name: lora, strength: 0.8 }],
+      searchText: `perf-${seq++}`,
+    });
+  for (let i = 0; i < 30; i++) add(1000 + i, 'modelA', 'lora_x');
+  add(2000, 'modelB', 'lora_y');
+
+  // F1) 默认视图(某图库根 + 最新优先)必须走覆盖索引,不能 USE TEMP B-TREE 排序
+  const ro = new DatabaseSync(dbFile, { readOnly: true });
+  const plan = (ro
+    .prepare(
+      `EXPLAIN QUERY PLAN SELECT i.id FROM images i WHERE i.root_id = ? ORDER BY i.file_mtime DESC, i.id DESC LIMIT 120 OFFSET 0`
+    )
+    .all(rootId) as Array<{ detail: string }>).map((r) => r.detail).join(' | ');
+  if (/idx_images_root_mtime/.test(plan) && !/TEMP B-TREE/i.test(plan))
+    good('默认视图查询走 idx_images_root_mtime 覆盖索引(不再 USE TEMP B-TREE 全根排序)');
+  else bad(`默认视图查询没走预期索引,计划=${plan}`);
+
+  // F2) 库统计:UI 路径(tops:false)不扫 lora_refs;CLI 路径(tops 默认)照旧有
+  const light = pdb.getStats(undefined, { tops: false }) as any;
+  const full = pdb.getStats(undefined) as any;
+  if (Array.isArray(light.topLoras) && light.topLoras.length === 0 && light.topSamplers.length === 0
+      && light.totalImages === 31 && Array.isArray(light.topModels) && light.topModels.length === 2)
+    good('getStats({tops:false}):跳过 topLoras/topSamplers,仍给 totalImages 与 topModels(UI 只用这三样)');
+  else bad(`getStats({tops:false}) 形状不对:${JSON.stringify({ t: light.totalImages, m: light.topModels?.length, s: light.topSamplers?.length, l: light.topLoras?.length })}`);
+  if (full.topLoras.length > 0 && full.topSamplers.length > 0 && full.topLoras[0].name === 'lora_x')
+    good('getStats() 默认仍算 topSamplers/topLoras(CLI 统计不受影响)');
+  else bad(`getStats() 默认应当有 tops,得到 ${JSON.stringify(full.topLoras)}`);
+
+  // F3) 迁移兼容:老库(没有 base_name 列 / 没有新索引)打开后自动补齐
+  const cols = (ro.prepare('PRAGMA table_info(lora_refs)').all() as any[]).map((c) => c.name);
+  if (cols.includes('base_name')) good('lora_refs.base_name 列存在(定点筛选/统计走它)');
+  else bad('lora_refs 缺 base_name 列');
+  const indexes = (ro
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('images','lora_refs')`)
+    .all() as Array<{ name: string }>).map((r) => r.name);
+  if (indexes.includes('idx_images_root_mtime') && indexes.includes('idx_lora_refs_base'))
+    good('新索引都已建好(idx_images_root_mtime / idx_lora_refs_base)');
+  else bad(`索引缺失:${indexes.join(', ')}`);
+
+  ro.close();
+  pdb.close();
+  try {
+    fs.rmSync(dbFile, { force: true });
+  } catch {
+    /* Windows 上偶发文件仍被占用:临时文件,删不掉不影响验证结论 */
+  }
 }
 
 console.log('\n' + (failures === 0 ? 'OVERALL: PASS' : `OVERALL: FAIL (${failures} 项)`));
