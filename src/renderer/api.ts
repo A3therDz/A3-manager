@@ -144,15 +144,16 @@ function createHttpApi(): ApiSurface {
 
     // 设置:浏览器版用 localStorage 兜底(只影响界面,不影响托盘行为)
     getSettings: () => {
+      const base = { closeToTray: true, theme: 'dark', reduceEffects: false, backgroundImage: null, backgroundFit: 'cover', detailPanelMode: 'overlay' };
       try {
         const raw = localStorage.getItem('cam-settings');
-        return Promise.resolve({ closeToTray: true, theme: 'dark', reduceEffects: false, backgroundImage: null, backgroundFit: 'cover', ...(raw ? JSON.parse(raw) : {}) } as AppSettings);
+        return Promise.resolve({ ...base, ...(raw ? JSON.parse(raw) : {}) } as AppSettings);
       } catch {
-        return Promise.resolve({ closeToTray: true, theme: 'dark', reduceEffects: false, backgroundImage: null, backgroundFit: 'cover' } as AppSettings);
+        return Promise.resolve(base as AppSettings);
       }
     },
     setSettings: (patch) => {
-      const cur = { closeToTray: true, theme: 'dark', reduceEffects: false, backgroundImage: null, backgroundFit: 'cover', ...JSON.parse(localStorage.getItem('cam-settings') ?? '{}') };
+      const cur = { closeToTray: true, theme: 'dark', reduceEffects: false, backgroundImage: null, backgroundFit: 'cover', detailPanelMode: 'overlay', ...JSON.parse(localStorage.getItem('cam-settings') ?? '{}') };
       const next = { ...cur, ...patch };
       localStorage.setItem('cam-settings', JSON.stringify(next));
       return Promise.resolve(next as AppSettings);

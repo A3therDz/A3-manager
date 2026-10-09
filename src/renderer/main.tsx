@@ -581,11 +581,48 @@ style.textContent = `
   }
   .cam-side { margin: 12px 10px 12px 12px; }
   .cam-gridwrap { margin: 12px 0 12px 0; }
+  /* 内容区(= 侧栏 + 网格 + 详情那一行)。相对定位给"向外延伸"的详情浮层当包含块,
+     overflow: hidden 把推到右缘之外的浮层裁掉 —— 否则绝对定位的浮层会把可滚动区
+     撑出窗口右缘,窗口平白多一条横向滚动条。 */
+  .cam-main { position: relative; overflow: hidden; }
   /* 详情面板的布局槽:宽度 0 ↔ 520 过渡,开/关时网格逐帧重排而不是瞬间让位。
-     面板本体固定 520px,槽位 overflow hidden 形成"从右缘抹入/抹出"的效果。 */
+     面板本体固定 520px,槽位 overflow hidden 形成"从右缘抹入/抹出"的效果。
+     —— 这是设置里的"向内挤压"。 */
   .cam-detail-slot {
     flex-shrink: 0; overflow: hidden; margin: 12px 12px 12px 0;
     transition: width var(--dur-3) var(--ease);
+  }
+  /* ---- 详情面板的另一种展开方式:向外延伸(设置里可切)----
+     贴在内容区右缘的浮层:不占布局、网格宽度一点不变,只做位移 ——
+     动画只碰 transform,不碰 width/left/right/margin,所以既不会重排网格,
+     也不会触发 ImageGrid 那套"容器宽度变了 → 140ms 去抖重算列宽"的路径。
+     位置用 absolute 挂在 .cam-main 上,包含块就是"侧栏 + 网格"这一行:
+     往上是工具条 / 标签栏,浮层够不到;右上角自绘的窗口最小化 / 最大化 / 关闭
+     按钮在 <main> 外面顶栏那 46px 里,更压不到。
+     层次靠左侧的发丝线(.cam-detail 自带 border-left)与投影,不用 backdrop-filter ——
+     浮层压在整屏滚动网格上,实时模糊会跟着网格滚动逐帧重算,是性能红线。 */
+  .cam-detail-overlay {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 520px;
+    /* 盖住网格与左栏;弹层 140+ / 右键菜单 150+ / 比对 380+ / 查看器 400 都在这之上 */
+    z-index: 60;
+    transform: translateX(100%);
+    transition: transform var(--dur-3) var(--ease);
+    will-change: transform;
+  }
+  /* 进场:挂载后先画一帧 translateX(100%),双拍 rAF 才挂上 .in ——
+     起点帧真的画过,transition 才有得插值。退场就是摘掉 .in,位移回 100%。 */
+  .cam-detail-overlay.in { transform: translateX(0); }
+  .cam-detail-overlay > .cam-detail {
+    /* 近不透明:下面就是网格,糊了会看不清参数;投影朝左,像从右缘拉出来的抽屉 */
+    background: color-mix(in srgb, var(--glass) 92%, var(--bg)) !important;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: var(--edge), -18px 0 40px rgba(0,0,0,.28);
+  }
+  /* sticky 顶栏同理:不做实时模糊,直接用实色压在滚动内容上 */
+  .cam-detail-overlay .cam-detail-head {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
   /* 详情面板的本体**不做进场动画**(v0.6:槽位宽度已经从 0 抹开,再叠一层
      位移动画会让面板在 520px 宽度里逐帧重排,预览大图尤其贵 ——
@@ -728,6 +765,8 @@ style.textContent = `
   html[data-lite='1'] .cam-detail-head { background: var(--panel); }
   /* 平面模式:槽位宽度不做过渡,直接到位 */
   html[data-lite='1'] .cam-detail-slot { transition: none; }
+  /* 平面模式:向外延伸也不做位移过渡,直接到位 */
+  html[data-lite='1'] .cam-detail-overlay { transition: none; }
   html[data-lite='1'] .cam-card { animation: none !important; }
   html[data-lite='1'] .cam-card:hover {
     backdrop-filter: none !important;
@@ -848,6 +887,7 @@ style.textContent = `
   @media (prefers-reduced-motion: reduce) {
     .cam-card, .cam-detail, .cam-modal, .cam-modal > div, .cam-menu, .cam-toast, .cam-selectbar, .cam-tab, .cam-lightbox, .cam-cmp, .cam-cmp2, .cam-recipe-body { animation: none !important; }
     .cam-detail-slot { transition: none; }
+    .cam-detail-overlay { transition: none; }
     .cam-card img { opacity: 1 !important; transition: none; }
     .cam-card:hover { transform: none; }
     .cam-card:hover img, .cam-card:hover img.loaded { transform: none !important; }

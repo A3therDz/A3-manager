@@ -361,6 +361,13 @@ export interface AppSettings {
   /** 背景铺法:裁切 cover / 拉伸 100%100% / 适应 contain / 平铺 repeat */
   backgroundFit: 'cover' | 'stretch' | 'contain' | 'tile';
   /**
+   * 点开图片时,右侧详情面板怎么出现。
+   *   squeeze —— 向内挤压:面板占住布局槽(0 ↔ 520px 宽度过渡),网格跟着让位、逐帧重排;
+   *   overlay —— 向外延伸:面板从内容区右缘滑出(只动 transform)、浮在网格上,网格宽度不变、不重排。
+   * 老配置里没有这个字段 → 走默认(overlay,即向外延伸)。
+   */
+  detailPanelMode: 'squeeze' | 'overlay';
+  /**
    * 工作小窗(桌宠):开启后桌面上会有一个可拖动的小图标,
    * 点一下在图标上方弹出一个小工作窗,只上下翻动。
    */

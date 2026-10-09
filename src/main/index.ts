@@ -175,12 +175,19 @@ migrateLegacyUserData();
 /** 设置结构版本:用来把"新默认值"只推一次给老用户(见下面的迁移) */
 const CONFIG_VERSION = 2;
 
+/** 详情面板展开方式:只认这两个值;其它值(手改过 settings.json / 老配置没有这个字段)回落到默认 */
+function normalizeDetailPanelMode(v: unknown): 'squeeze' | 'overlay' {
+  return v === 'squeeze' ? 'squeeze' : 'overlay';
+}
+
 let settings: {
   closeToTray: boolean;
   theme: 'dark' | 'light';
   reduceEffects: boolean;
   backgroundImage: string | null;
   backgroundFit: 'cover' | 'stretch' | 'contain' | 'tile';
+  /** 详情面板展开方式:向内挤压(网格让位)/ 向外延伸(浮在网格上,网格不重排) */
+  detailPanelMode: 'squeeze' | 'overlay';
   petEnabled: boolean;
   petPosition: { x: number; y: number } | null;
   petIconSize: number;
@@ -197,6 +204,8 @@ let settings: {
   reduceEffects: false,
   backgroundImage: null,
   backgroundFit: 'cover',
+  // 默认"向外延伸":点图时面板从右缘滑出、浮在网格上,网格不重排(老配置没有这个字段就走它)
+  detailPanelMode: 'overlay',
   petEnabled: false,
   petPosition: null,
   petIconSize: 64,
@@ -212,6 +221,8 @@ try {
 } catch {
   /* 首次运行没有文件,用默认值 */
 }
+// 非法值兜底:手改过 settings.json / 老版本没有这个字段,一律回落到默认的"向外延伸"
+settings.detailPanelMode = normalizeDetailPanelMode(settings.detailPanelMode);
 
 // —— 配置迁移 ——
 // v1 及更早的默认主题是暗色,老配置里存的就是那个旧默认值;这里把它改成新的默认(亮色),
@@ -1638,6 +1649,8 @@ function registerIpc(): void {
   handle('setSettings', (patch: Partial<typeof settings>) => {
     const wantPet = patch.petEnabled;
     settings = { ...settings, ...patch };
+    // 渲染层传什么都认:非法值只当没传,不写进 settings.json
+    settings.detailPanelMode = normalizeDetailPanelMode(settings.detailPanelMode);
     saveSettings();
     applyWindowChrome();
     if (petWindow && !petWindow.isDestroyed()) petWindow.setBackgroundColor('#00000000');

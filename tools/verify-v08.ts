@@ -1052,5 +1052,65 @@ console.log('\n--- F) 新图入库的读写路径(默认视图索引 / 库统计
   }
 }
 
+// ---------------------------------------------------------------- G. 详情面板展开方式(静态契约)
+
+console.log('\n--- G) 详情面板展开方式:向内挤压 / 向外延伸(设置项) ---');
+{
+  /** 取出 CSS 里某个选择器的整段规则(选择器后的第一个 { 到配对的 }) */
+  const ruleBlock = (css: string, selector: string): string => {
+    const at = css.indexOf(selector);
+    if (at < 0) return '';
+    const open = css.indexOf('{', at);
+    const close = css.indexOf('}', open);
+    return open < 0 || close < 0 ? '' : css.slice(open + 1, close);
+  };
+
+  // G1) 设置契约 + 默认值 + 非法值兜底
+  mustHave('src/shared/types.ts', 'detailPanelMode', '契约里有 detailPanelMode');
+  mustHave('src/shared/types.ts', "detailPanelMode: 'squeeze' | 'overlay'", "detailPanelMode 只认 'squeeze' | 'overlay' 两个值");
+  mustHave('src/main/index.ts', 'detailPanelMode', '主进程设置结构里有 detailPanelMode');
+  mustHave('src/main/index.ts', "detailPanelMode: 'overlay'", '主进程默认值是 overlay(向外延伸)');
+  mustHave('src/main/index.ts', 'normalizeDetailPanelMode', '主进程对非法值有兜底(非 squeeze 一律回落 overlay)');
+  mustHave('src/main/index.ts', 'settings.detailPanelMode = normalizeDetailPanelMode', '读盘与 setSettings 都过一遍兜底');
+  mustHave('src/renderer/App.tsx', 'setSettings({ detailPanelMode: mode })', '设置面板改完就落盘');
+  mustHave('src/renderer/App.tsx', 's.detailPanelMode ===', '启动时从主进程读回');
+
+  // G2) 两条渲染分支都在:向内挤压 = 布局槽,向外延伸 = 绝对定位浮层
+  mustHave('src/renderer/App.tsx', 'cam-detail-slot', '保留"向内挤压"的布局槽分支');
+  mustHave('src/renderer/App.tsx', 'cam-detail-overlay', '有"向外延伸"的浮层分支');
+  mustHave('src/renderer/App.tsx', "'squeeze'", "App 里有 'squeeze' 分支判断");
+  mustHave('src/renderer/App.tsx', "'overlay'", "App 里有 'overlay' 分支判断");
+  mustHave('src/renderer/App.tsx', '向内挤压', '设置面板有「向内挤压」选项');
+  mustHave('src/renderer/App.tsx', '向外延伸', '设置面板有「向外延伸」选项');
+
+  // G3) 浮层动画:只动 transform(宽度过渡会让网格重排,是"向内挤压"才做的事)
+  mustHave('src/renderer/main.tsx', '.cam-detail-overlay {', '浮层样式存在');
+  const overlayRule = ruleBlock(read('src/renderer/main.tsx'), '.cam-detail-overlay {');
+  if (/transform:\s*translateX\(/.test(overlayRule)) good('浮层用 transform: translateX(...) 做位移');
+  else bad(`浮层没有用 translateX 位移:${JSON.stringify(overlayRule)}`);
+  if (/transition:\s*transform\b/.test(overlayRule)) good('浮层过渡的是 transform');
+  else bad(`浮层过渡的不是 transform:${JSON.stringify(overlayRule)}`);
+  if (!/transition:\s*[^;]*\bwidth\b/.test(overlayRule)) good('浮层不做宽度过渡(不会挤压网格)');
+  else bad(`浮层仍在过渡宽度,会重排网格:${JSON.stringify(overlayRule)}`);
+  mustHave('src/renderer/main.tsx', '.cam-detail-overlay.in { transform: translateX(0); }', '进场/退场靠 .in 摘挂 translateX');
+
+  // G4) 浮层被关在内容区里:绝对定位于 .cam-main(不是铺满窗口的 fixed),
+  //     所以够不到顶栏/标签栏,更压不到右上角自绘的窗口按钮
+  if (/position:\s*absolute/.test(overlayRule) && !/position:\s*fixed/.test(overlayRule))
+    good('浮层锚在内容区(position: absolute),不是 fixed 铺满窗口');
+  else bad(`浮层定位不对(必须 absolute 锚在 .cam-main 里):${JSON.stringify(overlayRule)}`);
+  mustHave('src/renderer/main.tsx', '.cam-main { position: relative', '内容区是浮层的包含块(position: relative)');
+  mustHave('src/renderer/main.tsx', '.cam-main { position: relative; overflow: hidden; }', '内容区裁掉推到右缘外的浮层(不给窗口添横向滚动条)');
+  mustHave('src/renderer/App.tsx', 'className="cam-main"', 'App 的 <main> 挂上了 cam-main');
+  if (/z-index:\s*60\b/.test(overlayRule)) good('层级 60:盖住网格与左栏,低于弹层/菜单/查看器');
+  else bad(`浮层层级不对:${JSON.stringify(overlayRule)}`);
+  if (!/backdrop-filter/.test(overlayRule)) good('浮层容器自己不做 backdrop-filter(压在滚动网格上是性能红线)');
+  else bad('浮层容器不该有 backdrop-filter');
+
+  // G5) 平面模式 / 减少动效:不做位移过渡,直接到位
+  mustHave('src/renderer/main.tsx', "html[data-lite='1'] .cam-detail-overlay { transition: none; }", '平面模式关掉浮层过渡');
+  mustHave('src/renderer/main.tsx', '    .cam-detail-overlay { transition: none; }', 'prefers-reduced-motion 关掉浮层过渡');
+}
+
 console.log('\n' + (failures === 0 ? 'OVERALL: PASS' : `OVERALL: FAIL (${failures} 项)`));
 process.exit(failures === 0 ? 0 : 1);

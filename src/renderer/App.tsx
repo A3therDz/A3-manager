@@ -11,7 +11,7 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CategoryNode, CompareRow, DetailTarget, DroppedInspection, FolderNode, ImageQuery, ImageRecord, LibraryRoot, RecipeRecord, RecipeStat, SortKey } from '@shared/types';
+import type { AppSettings, CategoryNode, CompareRow, DetailTarget, DroppedInspection, FolderNode, ImageQuery, ImageRecord, LibraryRoot, RecipeRecord, RecipeStat, SortKey } from '@shared/types';
 import { errMsg, useCategories, useFolders, useImageDetail, useImages, useScanProgress, useStats } from './api';
 import { CategoryTree, FolderTree, FolderVisibilityTree, RecipeTree } from './components/Trees';
 import { ImageGrid } from './components/ImageGrid';
@@ -234,12 +234,21 @@ const EMPTY_SELECTION: ReadonlySet<number> = new Set<number>();
 const DETAIL_W = 520;
 
 /**
+ * 退场动画时长(ms):与 CSS 的 var(--dur-3)=340ms 对齐,留一点余量 ——
+ * 定时器到点就卸载面板,短于过渡时长会把最后几帧直接切掉。
+ * 两种展开方式(squeeze 的宽度过渡 / overlay 的位移过渡)共用这一个时长。
+ */
+const DETAIL_EXIT_MS = 400;
+
+/**
  * 详情面板的"布局槽"。
  *
  * 面板本身固定 520px 宽,槽位负责 0 ↔ 520 的**宽度过渡**:
  * 打开时槽位从 0 撑开(面板从右缘滑入),关闭时收回去 ——
  * 左侧瀑布流网格随槽位宽度逐帧重排,不再"瞬间让位"。
  * 进场要用两拍 rAF:先以 0 宽挂载一帧,再展开,CSS transition 才有机会播。
+ *
+ * 这是"向内挤压"模式:网格跟着让位。想不挤压网格见下面的 DetailOverlay。
  */
 function DetailSlot({ closing, children }: { closing: boolean; children: React.ReactNode }) {
   const [entered, setEntered] = useState(false);
@@ -261,6 +270,40 @@ function DetailSlot({ closing, children }: { closing: boolean; children: React.R
   );
 }
 
+/**
+ * "向外延伸"模式的详情面板容器。
+ *
+ * 与 DetailSlot 的区别:这里**不占布局**——容器是贴住内容区右缘的绝对定位浮层,
+ * 网格照旧铺满整个宽度、一帧都不用重排。
+ *
+ * 位置:absolute 的包含块是 <main>(= 侧栏 + 网格 + 详情所在的那一行,.cam-main 有
+ * position: relative),所以面板被**关在内容区里**,既不会盖住上面的工具条 / 标签栏,
+ * 也碰不到右上角自绘的窗口最小化 / 最大化 / 关闭按钮(它们在 <main> 外面、顶栏那 46px 里)。
+ *
+ * 动画只动 transform(translateX:100% → 0),不动 width/left/right/margin:
+ *   - 进场双拍 rAF(与 DetailSlot 同一套):先以"完全推到右缘外"挂载并画一帧,
+ *     再摘掉位移,浏览器才有起点可以插值,transition 才播得出来;
+ *   - 退场靠父级把 closing 置位 → 位移回到 100%(面板滑出屏幕),父级等
+ *     DETAIL_EXIT_MS 后才卸载,保证动画播完。
+ * 平面模式(html[data-lite=1])与 prefers-reduced-motion 下 CSS 里把 transition 关掉,
+ * 直接到位,不会留下一条缝。
+ */
+function DetailOverlay({ closing, children }: { closing: boolean; children: React.ReactNode }) {
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setEntered(true));
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, []);
+  const open = entered && !closing;
+  return <div className={`cam-detail-overlay${open ? ' in' : ''}`}>{children}</div>;
+}
+
 /** 作者与仓库:想换成自己的仓库地址,只改这两行 */
 const AUTHOR_NAME = 'A3ther';
 const REPO_URL = 'https://github.com/A3therDz/A3-manager';
@@ -273,6 +316,17 @@ const BG_FIT = {
   tile: { label: '平铺', size: 'auto', repeat: 'repeat', position: 'left top' },
 } as const;
 type BgFit = keyof typeof BG_FIT;
+
+/**
+ * 详情面板展开方式(设置里的枚举项):
+ *   squeeze —— 向内挤压:面板占住布局槽,网格跟着让位、逐帧重排(老行为);
+ *   overlay —— 向外延伸:面板从内容区右缘滑出、浮在网格上,网格宽度不变。
+ */
+const DETAIL_MODE = {
+  squeeze: { label: '向内挤压', hint: '网格跟着让位' },
+  overlay: { label: '向外延伸', hint: '从右缘滑出、浮在网格上' },
+} as const;
+type DetailMode = AppSettings['detailPanelMode'];
 
 // ---------------------------------------------------------------- 标签页
 //
@@ -580,6 +634,8 @@ export function App() {
     return v >= 0.5 && v <= 3 ? v : 1;
   });
   const [bgName, setBgName] = useState<string>('');
+  /** 详情面板展开方式:向内挤压(网格让位)/ 向外延伸(浮在网格上,网格不重排) */
+  const [detailMode, setDetailMode] = useState<DetailMode>('overlay');
   const [winMaximized, setWinMaximized] = useState(false);
   // 探测放到首屏之后再做:创建 WebGL 上下文本身在坏显卡上会卡,不能挡首屏
   const [autoLite, setAutoLite] = useState(false);
@@ -614,6 +670,24 @@ export function App() {
     setBgFit(fit);
     window.api.setSettings({ backgroundFit: fit }).catch(() => undefined);
   }, []);
+
+  /**
+   * 切换详情面板的展开方式。两种方式只差一个 CSS 类,网格那边不用手动通知:
+   * ImageGrid 自己 ResizeObserver 观察容器宽度 —— 挤压模式下容器宽度真的变了,
+   * 它会在 140ms 去抖后重算列宽;向外延伸模式容器宽度**不变**,那就不该重排。
+   */
+  const applyDetailMode = useCallback(
+    (mode: DetailMode) => {
+      setDetailMode(mode);
+      window.api
+        .setSettings({ detailPanelMode: mode })
+        .then(() =>
+          notify(mode === 'overlay' ? '详情面板:向外延伸(浮在网格上)' : '详情面板:向内挤压(网格让位)')
+        )
+        .catch(() => undefined);
+    },
+    [notify]
+  );
 
   const chooseBackground = useCallback(async () => {
     try {
@@ -674,6 +748,7 @@ export function App() {
         setReduceEffects(s.reduceEffects === true);
         if (s.theme === 'light' || s.theme === 'dark') setTheme(s.theme);
         if (s.backgroundFit) setBgFit(s.backgroundFit as BgFit);
+        if (s.detailPanelMode === 'squeeze' || s.detailPanelMode === 'overlay') setDetailMode(s.detailPanelMode);
         if (s.backgroundImage) setBgName(s.backgroundImage.split(/[\\/]/).pop() ?? '');
         window.api.getBackgroundUrl().then(setBgUrl).catch(() => undefined);
         setSettingsReady(true);
@@ -1588,9 +1663,10 @@ export function App() {
 
   /**
    * 详情面板的退场:关闭时先把目标"冻"住(内容不变)并标记 closing,
-   * 槽位宽度随即过渡到 0(面板向右滑出、网格平滑铺开),
-   * 等动画播完再把冻结值清掉。否则点关闭的瞬间面板会直接消失。
-   * 400ms ≈ 槽位宽度过渡(var(--dur-3)=340ms)+ 余量。
+   * 面板随即开始退场 —— 挤压模式是把槽位宽度过渡回 0(网格平滑铺开),
+   * 向外延伸模式是把浮层位移回 translateX(100%)(滑出右缘);
+   * 等动画播完( DETAIL_EXIT_MS = 与 var(--dur-3) 对齐的时长 + 余量)再把冻结值清掉。
+   * 否则点关闭的瞬间面板会直接消失,动画根本来不及播。
    */
   const [detailClosing, setDetailClosing] = useState(false);
   const frozenTargetRef = useRef<DetailTarget | null>(null);
@@ -1610,7 +1686,7 @@ export function App() {
         setSelectedId(null);
         setTempDetail(null);
         setDetailClosing(false);
-      }, 400);
+      }, DETAIL_EXIT_MS);
       return true;
     });
   }, []);
@@ -1762,6 +1838,51 @@ export function App() {
     if (el) el.scrollTop = pendingScrollRef.current;
     pendingScrollRef.current = null;
   }, [rows]);
+
+  /**
+   * 详情面板本体。抽成变量是因为它有一大堆 props ——
+   * 挤压模式塞进 DetailSlot(布局槽),向外延伸模式塞进 DetailOverlay(绝对定位浮层),
+   * 两种模式共用同一个元素,不复制。
+   */
+  const detailPanelEl = renderTarget ? (
+    <DetailPanel
+      target={renderTarget}
+      categories={catList}
+      catIds={detail.cats.data ?? []}
+      onClose={closeDetail}
+      onPrev={prev}
+      onNext={next}
+      canPrev={selectedId !== null && viewIdx > 0}
+      canNext={selectedId !== null && viewIdx >= 0 && viewIdx < rows.length - 1}
+      onToggleStar={(id, starred) => void toggleStar(id, starred)}
+      onReveal={(id) =>
+        void window.api.revealInExplorer(id).catch((e) => notify(errMsg(e), true))
+      }
+      onOpenFolder={() => {
+        // 索引图:直接打开它所在的目录;拖入图:打开它所在目录
+        const dir =
+          selectedId !== null
+            ? detail.detail.data?.absPath.replace(/[\\/][^\\/]*$/, '') ?? ''
+            : tempDetail
+              ? tempDetail.path.replace(/[\\/][^\\/]*$/, '')
+              : '';
+        if (!dir) return;
+        void window.api.openFolder(dir).catch((e) => notify(errMsg(e), true));
+      }}
+      onCopyPath={(id) =>
+        void window.api
+          .copyPath(id)
+          .then(() => notify('路径已复制'))
+          .catch((e) => notify(errMsg(e), true))
+      }
+      onOpenViewer={(id) => openLightboxInList(id)}
+      recipes={recipes}
+      onSaveRecipe={(ls) => openRecipeModal({ initialLoras: ls })}
+      onCompare={openCompareFromDetail}
+      onChanged={refreshCategories}
+      notify={notify}
+    />
+  ) : null;
 
   return (
     <div
@@ -2035,7 +2156,11 @@ export function App() {
         </button>
       </nav>
 
-      <main style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+      {/* 内容区(= 侧栏 + 网格 + 详情)。相对定位 + overflow: hidden 是给
+          "向外延伸"的详情浮层当包含块用的:浮层被关在这一行里,够不到上面的
+          工具条/标签栏与右上角的窗口按钮;退场时它被推到右缘之外,也由这里裁掉,
+          不会把整个窗口撑出一条横向滚动条。 */}
+      <main className="cam-main" style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         <aside
           className="cam-side"
           style={{
@@ -2140,45 +2265,11 @@ export function App() {
         </div>
 
         {renderTarget ? (
-          <DetailSlot closing={detailClosing}>
-            <DetailPanel
-              target={renderTarget}
-              categories={catList}
-              catIds={detail.cats.data ?? []}
-              onClose={closeDetail}
-              onPrev={prev}
-              onNext={next}
-              canPrev={selectedId !== null && viewIdx > 0}
-              canNext={selectedId !== null && viewIdx >= 0 && viewIdx < rows.length - 1}
-              onToggleStar={(id, starred) => void toggleStar(id, starred)}
-              onReveal={(id) =>
-                void window.api.revealInExplorer(id).catch((e) => notify(errMsg(e), true))
-              }
-              onOpenFolder={() => {
-                // 索引图:直接打开它所在的目录;拖入图:打开它所在目录
-                const dir =
-                  selectedId !== null
-                    ? detail.detail.data?.absPath.replace(/[\\/][^\\/]*$/, '') ?? ''
-                    : tempDetail
-                      ? tempDetail.path.replace(/[\\/][^\\/]*$/, '')
-                      : '';
-                if (!dir) return;
-                void window.api.openFolder(dir).catch((e) => notify(errMsg(e), true));
-              }}
-              onCopyPath={(id) =>
-                void window.api
-                  .copyPath(id)
-                  .then(() => notify('路径已复制'))
-                  .catch((e) => notify(errMsg(e), true))
-              }
-              onOpenViewer={(id) => openLightboxInList(id)}
-              recipes={recipes}
-              onSaveRecipe={(ls) => openRecipeModal({ initialLoras: ls })}
-              onCompare={openCompareFromDetail}
-              onChanged={refreshCategories}
-              notify={notify}
-            />
-          </DetailSlot>
+          detailMode === 'overlay' ? (
+            <DetailOverlay closing={detailClosing}>{detailPanelEl}</DetailOverlay>
+          ) : (
+            <DetailSlot closing={detailClosing}>{detailPanelEl}</DetailSlot>
+          )
         ) : null}
       </main>
 
@@ -2705,6 +2796,32 @@ export function App() {
                   value={reduceEffects || autoLite}
                   onChange={applyReduceEffects}
                 />
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <div>
+                  <div style={{ fontSize: 12 }}>详情面板展开方式</div>
+                  <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+                    向内挤压:网格跟着让位;向外延伸:面板浮在网格上,网格不重排
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                  {(Object.keys(DETAIL_MODE) as DetailMode[]).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      title={DETAIL_MODE[m].hint}
+                      style={
+                        detailMode === m
+                          ? { ...btn, borderColor: 'var(--accent)', color: 'var(--accent)', background: 'var(--accent-soft)' }
+                          : btn
+                      }
+                      onClick={() => applyDetailMode(m)}
+                    >
+                      {DETAIL_MODE[m].label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
