@@ -1065,51 +1065,62 @@ console.log('\n--- G) 详情面板展开方式:向内挤压 / 向外延伸(设�
     return open < 0 || close < 0 ? '' : css.slice(open + 1, close);
   };
 
-  // G1) 设置契约 + 默认值 + 非法值兜底
+  // G1) 设置契约 + 默认值 + 兜底(含老版本的 'overlay' 归到新的 'extend')
   mustHave('src/shared/types.ts', 'detailPanelMode', '契约里有 detailPanelMode');
-  mustHave('src/shared/types.ts', "detailPanelMode: 'squeeze' | 'overlay'", "detailPanelMode 只认 'squeeze' | 'overlay' 两个值");
-  mustHave('src/main/index.ts', 'detailPanelMode', '主进程设置结构里有 detailPanelMode');
-  mustHave('src/main/index.ts', "detailPanelMode: 'overlay'", '主进程默认值是 overlay(向外延伸)');
-  mustHave('src/main/index.ts', 'normalizeDetailPanelMode', '主进程对非法值有兜底(非 squeeze 一律回落 overlay)');
+  mustHave('src/shared/types.ts', "detailPanelMode: 'squeeze' | 'extend'", "detailPanelMode 只认 'squeeze' | 'extend'");
+  mustHave('src/main/index.ts', "detailPanelMode: 'squeeze' | 'extend'", '主进程设置结构里也是同两个值');
+  mustHave('src/main/index.ts', "detailPanelMode: 'extend'", "主进程默认值是 'extend'(向外延伸)");
+  mustHave('src/main/index.ts', 'normalizeDetailPanelMode', '主进程对非法值有兜底');
+  mustHave('src/main/index.ts', "if (v === 'squeeze') return 'squeeze';", '只认 squeeze,其余一律回落');
+  mustHave('src/main/index.ts', "return 'extend';", "老版本 'overlay' / 非法值都归到 'extend'");
   mustHave('src/main/index.ts', 'settings.detailPanelMode = normalizeDetailPanelMode', '读盘与 setSettings 都过一遍兜底');
   mustHave('src/renderer/App.tsx', 'setSettings({ detailPanelMode: mode })', '设置面板改完就落盘');
   mustHave('src/renderer/App.tsx', 's.detailPanelMode ===', '启动时从主进程读回');
+  mustHave('src/renderer/App.tsx', "=== 'overlay'", "老配置里的 'overlay' 被当作向外延伸读回");
 
-  // G2) 两条渲染分支都在:向内挤压 = 布局槽,向外延伸 = 绝对定位浮层
-  mustHave('src/renderer/App.tsx', 'cam-detail-slot', '保留"向内挤压"的布局槽分支');
-  mustHave('src/renderer/App.tsx', 'cam-detail-overlay', '有"向外延伸"的浮层分支');
-  mustHave('src/renderer/App.tsx', "'squeeze'", "App 里有 'squeeze' 分支判断");
-  mustHave('src/renderer/App.tsx', "'overlay'", "App 里有 'overlay' 分支判断");
+  // G2) 两种方式共用一个容器,只是 windowExtend 开关的差别;旧的浮层实现必须清干净
+  mustHave('src/renderer/App.tsx', 'cam-detail-slot', '面板容器仍是布局槽(cam-detail-slot)');
+  mustHave('src/renderer/App.tsx', 'windowExtend={detailExtend}', '按本次评估结果决定是否走"向外延伸"');
   mustHave('src/renderer/App.tsx', '向内挤压', '设置面板有「向内挤压」选项');
   mustHave('src/renderer/App.tsx', '向外延伸', '设置面板有「向外延伸」选项');
+  mustNotHave('src/renderer/App.tsx', 'cam-detail-overlay', '旧的"浮在网格上"实现已移除(会遮住卡片)');
+  mustNotHave('src/renderer/main.tsx', '.cam-detail-overlay', '旧的浮层样式已移除(不留死代码)');
 
-  // G3) 浮层动画:只动 transform(宽度过渡会让网格重排,是"向内挤压"才做的事)
-  mustHave('src/renderer/main.tsx', '.cam-detail-overlay {', '浮层样式存在');
-  const overlayRule = ruleBlock(read('src/renderer/main.tsx'), '.cam-detail-overlay {');
-  if (/transform:\s*translateX\(/.test(overlayRule)) good('浮层用 transform: translateX(...) 做位移');
-  else bad(`浮层没有用 translateX 位移:${JSON.stringify(overlayRule)}`);
-  if (/transition:\s*transform\b/.test(overlayRule)) good('浮层过渡的是 transform');
-  else bad(`浮层过渡的不是 transform:${JSON.stringify(overlayRule)}`);
-  if (!/transition:\s*[^;]*\bwidth\b/.test(overlayRule)) good('浮层不做宽度过渡(不会挤压网格)');
-  else bad(`浮层仍在过渡宽度,会重排网格:${JSON.stringify(overlayRule)}`);
-  mustHave('src/renderer/main.tsx', '.cam-detail-overlay.in { transform: translateX(0); }', '进场/退场靠 .in 摘挂 translateX');
+  // G3) "向外延伸" = 窗口向右扩一块:窗口增量与槽位宽度逐帧同步,网格宽度全程恒定
+  mustHave('src/renderer/App.tsx', 'window.api.detailPanelSpace(', '渲染层逐帧把"向外扩了多少"报给主进程');
+  mustHave('src/renderer/App.tsx', 'DETAIL_EXTEND_TOTAL', '窗口扩出的总宽 = 面板宽 + 槽位右边距(网格宽度才算恒定)');
+  if (/const DETAIL_EXTEND_TOTAL = DETAIL_W \+ DETAIL_SLOT_GUTTER;/.test(read('src/renderer/App.tsx')))
+    good('DETAIL_EXTEND_TOTAL 明确由 DETAIL_W + DETAIL_SLOT_GUTTER 组成');
+  else bad('DETAIL_EXTEND_TOTAL 的组成不对(网格会被挤掉右边距那么多)');
+  mustHave('src/renderer/App.tsx', 'requestAnimationFrame', '窗口伸缩与槽位宽度用 rAF 逐帧驱动');
+  mustHave('src/renderer/App.tsx', 'skipDetailAnimation()', '平面模式/减少动效时不做逐帧动画(但仍然要长宽)');
+  mustHave('src/renderer/App.tsx', 'tell(0)', '卸载时兜底把窗口缩回去');
+  mustHave('src/renderer/App.tsx', 'getDetailPanelRoom()', '打开前先问"屏幕右边还有多少地方可扩"');
+  mustHave('src/renderer/App.tsx', '>= DETAIL_EXTEND_MIN', '可扩量太少(最大化/全屏)才退回"向内挤压"');
+  mustHave('src/renderer/App.tsx', 'DETAIL_EXTEND_MIN = 200', '可扩量下限是个明确常量(够一部分时按"能扩多少扩多少")');
+  mustHave('src/renderer/App.tsx', '窗口可以左移的距离', '够不够是按"右边剩余 + 可左移距离"算的');
+  const jswidth = ruleBlock(read('src/renderer/main.tsx'), '.cam-detail-slot.jswidth');
+  if (/transition:\s*none/.test(jswidth)) good('JS 驱动宽度时不叠 CSS 过渡(避免与 rAF 打架)');
+  else bad(`.cam-detail-slot.jswidth 应关掉过渡:${JSON.stringify(jswidth)}`);
 
-  // G4) 浮层被关在内容区里:绝对定位于 .cam-main(不是铺满窗口的 fixed),
-  //     所以够不到顶栏/标签栏,更压不到右上角自绘的窗口按钮
-  if (/position:\s*absolute/.test(overlayRule) && !/position:\s*fixed/.test(overlayRule))
-    good('浮层锚在内容区(position: absolute),不是 fixed 铺满窗口');
-  else bad(`浮层定位不对(必须 absolute 锚在 .cam-main 里):${JSON.stringify(overlayRule)}`);
-  mustHave('src/renderer/main.tsx', '.cam-main { position: relative', '内容区是浮层的包含块(position: relative)');
-  mustHave('src/renderer/main.tsx', '.cam-main { position: relative; overflow: hidden; }', '内容区裁掉推到右缘外的浮层(不给窗口添横向滚动条)');
-  mustHave('src/renderer/App.tsx', 'className="cam-main"', 'App 的 <main> 挂上了 cam-main');
-  if (/z-index:\s*60\b/.test(overlayRule)) good('层级 60:盖住网格与左栏,低于弹层/菜单/查看器');
-  else bad(`浮层层级不对:${JSON.stringify(overlayRule)}`);
-  if (!/backdrop-filter/.test(overlayRule)) good('浮层容器自己不做 backdrop-filter(压在滚动网格上是性能红线)');
-  else bad('浮层容器不该有 backdrop-filter');
-
-  // G5) 平面模式 / 减少动效:不做位移过渡,直接到位
-  mustHave('src/renderer/main.tsx', "html[data-lite='1'] .cam-detail-overlay { transition: none; }", '平面模式关掉浮层过渡');
-  mustHave('src/renderer/main.tsx', '    .cam-detail-overlay { transition: none; }', 'prefers-reduced-motion 关掉浮层过渡');
+  // G4) 主进程:只改窗口宽度(x/y/height 不动),最大化/全屏时没有可扩空间
+  mustHave('src/main/index.ts', 'function detailMaxExtra()', '主进程知道"一共还能向外借多少宽度"');
+  mustHave('src/main/index.ts', 'isMaximized() || mainWindow.isFullScreen()', '最大化/全屏时没有可扩空间');
+  mustHave('src/main/index.ts', 'screen.getDisplayMatching(mainWindow.getBounds()).workArea', '按当前显示器的工作区计算,不越界到屏幕外');
+  mustHave('src/main/index.ts', 'const roomLeft = Math.max(0, b.x - wa.x)', '算上"窗口还能左移多少"(右边没地方时靠它腾空间)');
+  mustHave('src/main/index.ts', 'const shift = Math.min(Math.max(0, want - base.roomRight), base.roomLeft)', '扩宽不够就往左挪,挪到贴住工作区左缘为止');
+  mustHave('src/main/index.ts', 'detailBase', '记下"没扩之前"的几何,收起时原样复原');
+  mustHave('src/main/index.ts', 'applyDetailSpace', '有"把扩出去的宽度调到 px"的实现');
+  if (/x: base\.x - shift,[\s\S]{0,80}width: base\.width \+ want,/.test(read('src/main/index.ts')))
+    good('按基准几何改 x 与 width(右边不够时左移),高度与纵向位置保持');
+  else bad('改窗口几何的写法不对(要以"没扩之前"的几何为基准)');
+  mustHave('src/main/index.ts', "ipcMain.on('detail-panel-space'", 'fire-and-forget 通道存在(动画逐帧调用,不能等回复)');
+  mustHave('src/preload/index.cjs', "ipcRenderer.send('detail-panel-space', px)", 'preload 用 send 而不是 invoke');
+  mustHave('src/main/index.ts', "webContents.send('detail:spaceReset')", '最大化/全屏时通知渲染层重新评估');
+  mustHave('src/main/index.ts', 'resetDetailSpaceOnWindowChange', '窗口状态变化会作废这套几何');
+  mustHave('src/renderer/App.tsx', 'onDetailSpaceReset', '渲染层订阅并退回挤压布局');
+  mustHave('src/shared/types.ts', 'onDetailSpaceReset(cb: () => void)', '订阅通道进了契约');
+  mustHave('src/preload/index.cjs', "ipcRenderer.on('detail:spaceReset'", 'preload 暴露订阅');
 }
 
 console.log('\n' + (failures === 0 ? 'OVERALL: PASS' : `OVERALL: FAIL (${failures} 项)`));

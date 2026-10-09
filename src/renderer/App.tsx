@@ -236,72 +236,144 @@ const DETAIL_W = 520;
 /**
  * 退场动画时长(ms):与 CSS 的 var(--dur-3)=340ms 对齐,留一点余量 ——
  * 定时器到点就卸载面板,短于过渡时长会把最后几帧直接切掉。
- * 两种展开方式(squeeze 的宽度过渡 / overlay 的位移过渡)共用这一个时长。
+ * 两种展开方式(挤压的宽度过渡 / 向外延伸的窗口伸缩)共用这一个时长。
  */
 const DETAIL_EXIT_MS = 400;
 
 /**
- * 详情面板的"布局槽"。
+ * "向外延伸"时窗口伸缩 + 槽位宽度逐帧同步的时长(ms)与缓动。
  *
- * 面板本身固定 520px 宽,槽位负责 0 ↔ 520 的**宽度过渡**:
- * 打开时槽位从 0 撑开(面板从右缘滑入),关闭时收回去 ——
- * 左侧瀑布流网格随槽位宽度逐帧重排,不再"瞬间让位"。
- * 进场要用两拍 rAF:先以 0 宽挂载一帧,再展开,CSS transition 才有机会播。
- *
- * 这是"向内挤压"模式:网格跟着让位。想不挤压网格见下面的 DetailOverlay。
+ * `DETAIL_SLOT_GUTTER` = 槽位的右边距(.cam-detail-slot 的 margin-right)。
+ * 窗口要多长这么多像素,网格宽度才**恰好不变**:
+ *   网格宽 = 窗口宽 - 侧栏 - (槽位宽 + 12)
+ * 窗口 +X 且槽位 +X 时,上式的 X 被 12 抵消,只有在"窗口多长 12"时网格宽才全程恒定。
  */
-function DetailSlot({ closing, children }: { closing: boolean; children: React.ReactNode }) {
-  const [entered, setEntered] = useState(false);
-  useEffect(() => {
-    let raf2 = 0;
-    const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => setEntered(true));
-    });
-    return () => {
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
-    };
-  }, []);
-  const width = !entered || closing ? 0 : DETAIL_W;
-  return (
-    <div className={`cam-detail-slot${closing ? ' closing' : ''}`} style={{ width }}>
-      {children}
-    </div>
-  );
+const DETAIL_EXTEND_MS = 240;
+const DETAIL_SLOT_GUTTER = 12;
+/** 向外延伸需要向屏幕(右侧 + 窗口可左移的距离)借的总宽度 */
+const DETAIL_EXTEND_TOTAL = DETAIL_W + DETAIL_SLOT_GUTTER;
+/**
+ * 可扩量的下限:低于它就别折腾窗口了(最大化/全屏时是 0),直接走"向内挤压"。
+ * 介于下限与总宽之间时按"能扩多少扩多少"来:窗口长出真实空间,网格只让出差额。
+ */
+const DETAIL_EXTEND_MIN = 200;
+const easeOutCubic = (k: number) => 1 - Math.pow(1 - k, 3);
+
+/** 平面模式 / 系统"减少动画":窗口还是要长宽(那是功能),但一步到位,不做逐帧动画 */
+function skipDetailAnimation(): boolean {
+  if (typeof document !== 'undefined' && document.documentElement.dataset.lite === '1') return true;
+  return typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
 }
 
 /**
- * "向外延伸"模式的详情面板容器。
+ * 详情面板的容器(两种展开方式共用)。
  *
- * 与 DetailSlot 的区别:这里**不占布局**——容器是贴住内容区右缘的绝对定位浮层,
- * 网格照旧铺满整个宽度、一帧都不用重排。
+ * - `squeeze`(向内挤压):面板固定 520px,槽位宽度 0 ↔ 520 走 CSS 过渡,
+ *   左侧瀑布流网格随槽位宽度逐帧重排(老行为)。
+ * - `windowExtend`(向外延伸):**窗口自己向右扩出一块**,槽位宽度与窗口增量
+ *   逐帧同步(见下面的 rAF 循环)—— 两者一起长,网格拿到的宽度全程不变,
+ *   于是既不被挤压、也不会被面板遮住;屏幕右边没地方可扩时上层会退回 squeeze。
  *
- * 位置:absolute 的包含块是 <main>(= 侧栏 + 网格 + 详情所在的那一行,.cam-main 有
- * position: relative),所以面板被**关在内容区里**,既不会盖住上面的工具条 / 标签栏,
- * 也碰不到右上角自绘的窗口最小化 / 最大化 / 关闭按钮(它们在 <main> 外面、顶栏那 46px 里)。
- *
- * 动画只动 transform(translateX:100% → 0),不动 width/left/right/margin:
- *   - 进场双拍 rAF(与 DetailSlot 同一套):先以"完全推到右缘外"挂载并画一帧,
- *     再摘掉位移,浏览器才有起点可以插值,transition 才播得出来;
- *   - 退场靠父级把 closing 置位 → 位移回到 100%(面板滑出屏幕),父级等
- *     DETAIL_EXIT_MS 后才卸载,保证动画播完。
- * 平面模式(html[data-lite=1])与 prefers-reduced-motion 下 CSS 里把 transition 关掉,
- * 直接到位,不会留下一条缝。
+ * 进场仍然要用两拍 rAF:挤压模式先以 0 宽挂载一帧,CSS transition 才有起点可插值;
+ * 向外延伸模式则由 rAF 循环直接驱动宽度,逐帧把目标值报给主进程
+ * (`detailPanelSpace`,fire-and-forget)。
  */
-function DetailOverlay({ closing, children }: { closing: boolean; children: React.ReactNode }) {
+function DetailSlot({
+  closing,
+  windowExtend,
+  children,
+}: {
+  closing: boolean;
+  windowExtend: boolean;
+  children: React.ReactNode;
+}) {
   const [entered, setEntered] = useState(false);
-  useEffect(() => {
-    let raf2 = 0;
-    const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => setEntered(true));
-    });
-    return () => {
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
-    };
+  /** 向外延伸模式下由 JS 驱动的宽度;挤压模式下恒为 DETAIL_W(closing 时 0) */
+  const [jsWidth, setJsWidth] = useState(0);
+  /** 当前宽度的镜像(退场动画要从"此刻的宽度"往回缩,不能从 520 硬缩) */
+  const widthRef = useRef(0);
+  widthRef.current = jsWidth;
+  /** 把"已经扩出去多少"告诉主进程;卸载时兜底归零,保证窗口一定缩回来 */
+  const tell = useCallback((px: number) => {
+    try {
+      window.api.detailPanelSpace(px);
+    } catch {
+      /* 浏览器调试版没有这个能力 */
+    }
   }, []);
-  const open = entered && !closing;
-  return <div className={`cam-detail-overlay${open ? ' in' : ''}`}>{children}</div>;
+
+  useEffect(() => {
+    if (!windowExtend) {
+      let raf2 = 0;
+      const raf1 = requestAnimationFrame(() => {
+        raf2 = requestAnimationFrame(() => setEntered(true));
+      });
+      return () => {
+        cancelAnimationFrame(raf1);
+        cancelAnimationFrame(raf2);
+      };
+    }
+    // 向外延伸:窗口与槽位一起长宽
+    if (skipDetailAnimation()) {
+      setJsWidth(DETAIL_W);
+      tell(DETAIL_EXTEND_TOTAL);
+      return;
+    }
+    let raf = 0;
+    let t0 = 0;
+    const step = (now: number) => {
+      if (!t0) t0 = now;
+      const k = Math.min(1, (now - t0) / DETAIL_EXTEND_MS);
+      const e = easeOutCubic(k);
+      setJsWidth(Math.round(DETAIL_W * e));
+      // 窗口比槽位多长 12px(槽位右边距),网格宽度才会全程恒定
+      tell(Math.round(DETAIL_EXTEND_TOTAL * e));
+      if (k < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [windowExtend, tell]);
+
+  // 退场:把窗口与槽位一起收回去(取消掉可能还在跑的进场循环)
+  useEffect(() => {
+    if (!windowExtend || !closing) return;
+    if (skipDetailAnimation()) {
+      setJsWidth(0);
+      tell(0);
+      return;
+    }
+    let raf = 0;
+    let t0 = 0;
+    // from = 此刻槽位宽(可能是动画中途);窗口同步缩,比例保持一致
+    const from = widthRef.current;
+    const ratio = from > 0 ? DETAIL_EXTEND_TOTAL / DETAIL_W : 0;
+    const step = (now: number) => {
+      if (!t0) t0 = now;
+      const k = Math.min(1, (now - t0) / DETAIL_EXTEND_MS);
+      const left = from * (1 - easeOutCubic(k));
+      setJsWidth(Math.round(left));
+      tell(Math.round(left * ratio));
+      if (k < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [closing, windowExtend, tell]);
+
+  // 卸载兜底:无论如何都要把窗口缩回去(动画被打断也不留一条宽边)
+  useEffect(() => {
+    if (!windowExtend) return;
+    return () => tell(0);
+  }, [windowExtend, tell]);
+
+  const width = windowExtend ? jsWidth : !entered || closing ? 0 : DETAIL_W;
+  return (
+    <div
+      className={`cam-detail-slot${closing ? ' closing' : ''}${windowExtend ? ' jswidth' : ''}`}
+      style={{ width }}
+    >
+      {children}
+    </div>
+  );
 }
 
 /** 作者与仓库:想换成自己的仓库地址,只改这两行 */
@@ -320,11 +392,12 @@ type BgFit = keyof typeof BG_FIT;
 /**
  * 详情面板展开方式(设置里的枚举项):
  *   squeeze —— 向内挤压:面板占住布局槽,网格跟着让位、逐帧重排(老行为);
- *   overlay —— 向外延伸:面板从内容区右缘滑出、浮在网格上,网格宽度不变。
+ *   extend  —— 向外延伸:**窗口向右扩出一块**放面板,网格尺寸不变也不被遮挡;
+ *              屏幕右边没位置可扩(窗口最大化/全屏)时自动退回"向内挤压"。
  */
 const DETAIL_MODE = {
   squeeze: { label: '向内挤压', hint: '网格跟着让位' },
-  overlay: { label: '向外延伸', hint: '从右缘滑出、浮在网格上' },
+  extend: { label: '向外延伸', hint: '窗口向右扩出一块,网格不变、不遮挡' },
 } as const;
 type DetailMode = AppSettings['detailPanelMode'];
 
@@ -634,8 +707,16 @@ export function App() {
     return v >= 0.5 && v <= 3 ? v : 1;
   });
   const [bgName, setBgName] = useState<string>('');
-  /** 详情面板展开方式:向内挤压(网格让位)/ 向外延伸(浮在网格上,网格不重排) */
-  const [detailMode, setDetailMode] = useState<DetailMode>('overlay');
+  /** 详情面板展开方式:向内挤压(网格让位)/ 向外延伸(窗口向右扩出一块) */
+  const [detailMode, setDetailMode] = useState<DetailMode>('extend');
+  /**
+   * 本次打开的面板是否走"向外延伸"。设置里选了 extend 还要问主进程
+   * "还能往屏幕外借多少宽度"(右边剩余 + 窗口可以左移的距离):
+   * 够整个面板 → 网格一点不动;够一部分(≥ DETAIL_EXTEND_MIN)→ 扩多少算多少,
+   * 余下的由网格让位;几乎没有空间(最大化 / 全屏)→ 退回"向内挤压"。
+   * 无论哪种情况都不会把面板画到屏幕外。
+   */
+  const [detailExtend, setDetailExtend] = useState(false);
   const [winMaximized, setWinMaximized] = useState(false);
   // 探测放到首屏之后再做:创建 WebGL 上下文本身在坏显卡上会卡,不能挡首屏
   const [autoLite, setAutoLite] = useState(false);
@@ -682,7 +763,9 @@ export function App() {
       window.api
         .setSettings({ detailPanelMode: mode })
         .then(() =>
-          notify(mode === 'overlay' ? '详情面板:向外延伸(浮在网格上)' : '详情面板:向内挤压(网格让位)')
+          notify(
+            mode === 'extend' ? '详情面板:向外延伸(窗口向右扩出一块)' : '详情面板:向内挤压(网格让位)'
+          )
         )
         .catch(() => undefined);
     },
@@ -748,7 +831,9 @@ export function App() {
         setReduceEffects(s.reduceEffects === true);
         if (s.theme === 'light' || s.theme === 'dark') setTheme(s.theme);
         if (s.backgroundFit) setBgFit(s.backgroundFit as BgFit);
-        if (s.detailPanelMode === 'squeeze' || s.detailPanelMode === 'overlay') setDetailMode(s.detailPanelMode);
+        // 老配置里的 'overlay'(面板浮在网格上)按新语义当作"向外延伸"
+        if (s.detailPanelMode === 'squeeze') setDetailMode('squeeze');
+        else if (s.detailPanelMode === 'extend' || (s.detailPanelMode as string) === 'overlay') setDetailMode('extend');
         if (s.backgroundImage) setBgName(s.backgroundImage.split(/[\\/]/).pop() ?? '');
         window.api.getBackgroundUrl().then(setBgUrl).catch(() => undefined);
         setSettingsReady(true);
@@ -1695,6 +1780,49 @@ export function App() {
   if (panelTarget && !detailClosing) frozenTargetRef.current = panelTarget;
   const renderTarget = detailClosing ? frozenTargetRef.current : panelTarget;
 
+  /**
+   * "向外延伸"的可行性要按每次打开重新评估:
+   *   - 主进程给的是"窗口右边缘到当前显示器工作区右边缘还剩多少"(最大化/全屏时为 0);
+   *   - 够 520px 才走向外延伸(窗口与槽位一起长宽,网格不变、不遮挡);
+   *   - 不够就退回"向内挤压"(网格让位),绝不会把面板伸到屏幕外。
+   * 用被打开的目标做依赖:换图/换目标时重算一次;面板关掉时归零(触发槽位卸载兜底缩窗)。
+   */
+  const detailTargetKey =
+    panelTarget?.kind === 'indexed'
+      ? 'id:' + String(panelTarget.detail?.id ?? '')
+      : panelTarget?.kind === 'dropped'
+        ? 'file:' + panelTarget.info.path
+        : '';
+  useEffect(() => {
+    if (!detailTargetKey || detailMode !== 'extend') {
+      setDetailExtend(false);
+      return;
+    }
+    let cancelled = false;
+    void window.api
+      .getDetailPanelRoom()
+      .then((room) => {
+        // 可扩量够整个面板 → 网格一点不动;够一部分(≥200px)→ 扩多少算多少、
+        // 余下的由网格让位(比"整块 520 都挤网格"好得多);几乎没有空间(最大化/全屏)
+        // 才退回完整的"向内挤压"。
+        if (!cancelled) setDetailExtend(Number(room) >= DETAIL_EXTEND_MIN);
+      })
+      .catch(() => {
+        if (!cancelled) setDetailExtend(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [detailTargetKey, detailMode]);
+
+  /** 窗口被最大化 / 全屏:主进程作废"向外扩"的几何,这里退回挤压布局(窗口也会缩回去) */
+  useEffect(() => {
+    const off = window.api.onDetailSpaceReset?.(() => setDetailExtend(false));
+    return () => {
+      off?.();
+    };
+  }, []);
+
   // ---- 标签页操作:切换 / 新建 / 关闭 / 循环 ----
 
   /** 把"此刻"的活动标签状态(查询/滚动/已加载范围/打开的详情)写回标签列表 */
@@ -1841,8 +1969,8 @@ export function App() {
 
   /**
    * 详情面板本体。抽成变量是因为它有一大堆 props ——
-   * 挤压模式塞进 DetailSlot(布局槽),向外延伸模式塞进 DetailOverlay(绝对定位浮层),
-   * 两种模式共用同一个元素,不复制。
+   * 两种展开方式共用同一个元素(DetailSlot),只是 windowExtend 一个开关的差别
+   * (向外延伸时窗口与槽位一起长宽),不复制这一大堆 props。
    */
   const detailPanelEl = renderTarget ? (
     <DetailPanel
@@ -2265,11 +2393,9 @@ export function App() {
         </div>
 
         {renderTarget ? (
-          detailMode === 'overlay' ? (
-            <DetailOverlay closing={detailClosing}>{detailPanelEl}</DetailOverlay>
-          ) : (
-            <DetailSlot closing={detailClosing}>{detailPanelEl}</DetailSlot>
-          )
+          <DetailSlot closing={detailClosing} windowExtend={detailExtend}>
+            {detailPanelEl}
+          </DetailSlot>
         ) : null}
       </main>
 
@@ -2802,7 +2928,8 @@ export function App() {
                 <div>
                   <div style={{ fontSize: 12 }}>详情面板展开方式</div>
                   <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-                    向内挤压:网格跟着让位;向外延伸:面板浮在网格上,网格不重排
+                    向内挤压:网格跟着让位;向外延伸:窗口向右扩出一块放面板,
+                    网格尺寸不变、也不会被面板遮住(屏幕右边没位置时自动退回向内挤压)
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>

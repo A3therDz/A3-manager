@@ -176,8 +176,10 @@ migrateLegacyUserData();
 const CONFIG_VERSION = 2;
 
 /** 详情面板展开方式:只认这两个值;其它值(手改过 settings.json / 老配置没有这个字段)回落到默认 */
-function normalizeDetailPanelMode(v: unknown): 'squeeze' | 'overlay' {
-  return v === 'squeeze' ? 'squeeze' : 'overlay';
+function normalizeDetailPanelMode(v: unknown): 'squeeze' | 'extend' {
+  if (v === 'squeeze') return 'squeeze';
+  // 老版本的 'overlay'(面板浮在网格上、遮住卡片)已改成"窗口向右扩出一块",按新语义走
+  return 'extend';
 }
 
 let settings: {
@@ -186,8 +188,8 @@ let settings: {
   reduceEffects: boolean;
   backgroundImage: string | null;
   backgroundFit: 'cover' | 'stretch' | 'contain' | 'tile';
-  /** 详情面板展开方式:向内挤压(网格让位)/ 向外延伸(浮在网格上,网格不重排) */
-  detailPanelMode: 'squeeze' | 'overlay';
+  /** 详情面板展开方式:向内挤压(网格让位)/ 向外延伸(窗口向右扩出一块放面板) */
+  detailPanelMode: 'squeeze' | 'extend';
   petEnabled: boolean;
   petPosition: { x: number; y: number } | null;
   petIconSize: number;
@@ -204,8 +206,9 @@ let settings: {
   reduceEffects: false,
   backgroundImage: null,
   backgroundFit: 'cover',
-  // 默认"向外延伸":点图时面板从右缘滑出、浮在网格上,网格不重排(老配置没有这个字段就走它)
-  detailPanelMode: 'overlay',
+  // 默认"向外延伸":点图时**把窗口向右扩出一块**放面板 —— 网格尺寸不变、也不会被遮住
+  // (老配置没有这个字段就走它;老版本的 'overlay' 语义也归到这里)
+  detailPanelMode: 'extend',
   petEnabled: false,
   petPosition: null,
   petIconSize: 64,
@@ -221,7 +224,7 @@ try {
 } catch {
   /* 首次运行没有文件,用默认值 */
 }
-// 非法值兜底:手改过 settings.json / 老版本没有这个字段,一律回落到默认的"向外延伸"
+// 非法值兜底:手改过 settings.json / 老版本没有这个字段/老版本的 'overlay',一律归到"向外延伸"
 settings.detailPanelMode = normalizeDetailPanelMode(settings.detailPanelMode);
 
 // —— 配置迁移 ——
@@ -551,6 +554,88 @@ function syncRootWatchers(): void {
   console.log('[watch] 监听图库目录:', rootWatchers.length, '健康:', [...watchHealthy.values()].filter(Boolean).length);
 }
 
+/**
+ * 详情面板"向外延伸"的窗口几何。
+ *
+ * 目标:点开一张图时,**网格既不被挤压、也不被面板遮住** —— 面板在窗口的右侧
+ * 向外展开。做法是窗口本身向右长宽,渲染层把同样多的宽度给面板的布局槽;
+ * 两者逐帧一起动,网格宽度就全程不变。
+ *
+ * 右边不够时**把窗口整体左移**再扩:例如屏幕 1920、窗口 1440 居中(右边只剩 240),
+ * 就直接左移到贴住屏幕左缘并扩到屏幕右缘 —— 面板拿到真实空间,网格只被挤掉
+ * 差的那一点点(而不是整块 520)。
+ *
+ * `detailMaxExtra()`:在不越出工作区的前提下,一共还能扩出多少像素
+ * (右边剩余 + 左边可移动的距离)。最大化 / 全屏时为 0 —— 渲染层会退回"向内挤压"。
+ */
+function detailWorkArea(): Electron.Rectangle | null {
+  if (!mainWindow) return null;
+  return screen.getDisplayMatching(mainWindow.getBounds()).workArea;
+}
+
+function detailMaxExtra(): number {
+  if (!mainWindow) return 0;
+  if (mainWindow.isMaximized() || mainWindow.isFullScreen()) return 0;
+  const b = mainWindow.getBounds();
+  const wa = detailWorkArea();
+  if (!wa) return 0;
+  const roomRight = Math.max(0, wa.x + wa.width - (b.x + b.width));
+  const roomLeft = Math.max(0, b.x - wa.x);
+  return Math.round(roomRight + roomLeft);
+}
+
+let detailSpaceApplied = 0;
+/** 开始"向外扩"之前的窗口几何:收缩回 0 时用它复原(以及算左移量) */
+let detailBase: { x: number; width: number; roomRight: number; roomLeft: number } | null = null;
+
+function applyDetailSpace(px: number): void {
+  if (!mainWindow) return;
+  const b = mainWindow.getBounds();
+  let want = Math.max(0, Math.round(Number(px) || 0));
+  if (want > 0) {
+    if (!detailBase) {
+      const wa = detailWorkArea();
+      if (!wa) return;
+      const roomRight = Math.max(0, wa.x + wa.width - (b.x + b.width));
+      const roomLeft = Math.max(0, b.x - wa.x);
+      detailBase = { x: b.x, width: b.width, roomRight, roomLeft };
+    }
+    want = Math.min(want, detailBase.roomRight + detailBase.roomLeft);
+  }
+  if (want === detailSpaceApplied && !(want === 0 && detailBase)) return;
+
+  if (want === 0) {
+    if (detailBase) {
+      // 复原:位置移回、宽度缩回(用户在面板开着时改过高度/纵向位置的话,保留那些改动)
+      mainWindow.setBounds({ x: detailBase.x, y: b.y, width: detailBase.width, height: b.height });
+      detailBase = null;
+    }
+    detailSpaceApplied = 0;
+    return;
+  }
+
+  const base = detailBase!;
+  // 右边不够就往左挪(挪到贴住工作区左缘为止);g 单调增,收缩时自动反向,不会跳
+  const shift = Math.min(Math.max(0, want - base.roomRight), base.roomLeft);
+  mainWindow.setBounds({
+    x: base.x - shift,
+    y: b.y,
+    width: base.width + want,
+    height: b.height,
+  });
+  detailSpaceApplied = want;
+}
+
+/**
+ * 最大化 / 全屏会把这套几何作废(窗口已经被拉到整屏,再谈"扩出去多少"没意义):
+ * 清零并把渲染层喊回来重新评估(它会改用"向内挤压"布局,不会留下半截面板)。
+ */
+function resetDetailSpaceOnWindowChange(): void {
+  detailSpaceApplied = 0;
+  detailBase = null;
+  mainWindow?.webContents.send('detail:spaceReset');
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -573,6 +658,12 @@ function createWindow(): void {
   });
 
   mainWindow.once('ready-to-show', () => mainWindow?.show());
+
+  // 最大化 / 退出最大化 / 全屏:详情面板"向外延伸"占用的宽度会作废,通知渲染层重新评估
+  mainWindow.on('maximize', resetDetailSpaceOnWindowChange);
+  mainWindow.on('unmaximize', resetDetailSpaceOnWindowChange);
+  mainWindow.on('enter-full-screen', resetDetailSpaceOnWindowChange);
+  mainWindow.on('leave-full-screen', resetDetailSpaceOnWindowChange);
 
   // 关闭行为由设置决定:缩小到托盘(默认)或直接退出
   mainWindow.on('close', (e) => {
@@ -1616,6 +1707,19 @@ function registerIpc(): void {
   });
   handle('isWindowMaximized', () => mainWindow?.isMaximized() ?? false);
 
+  // ---- 详情面板"向外延伸":把窗口向右扩出一块放面板
+  //
+  // 需求:点开一张图时,**网格既不要被挤压、也不要被面板遮住** —— 面板应该在
+  // "整个窗口的右侧"向外展开。做法是让窗口本身向右长宽(左边框与内部各列的位置都不动),
+  // 渲染层再把同步的宽度给面板的布局槽;两者逐帧一起动,网格宽度全程不变。
+  //
+  // 之所以能这么干:窗口是无边框的(frame:false),内部布局是 flex
+  // (侧栏 | 网格 | 详情槽),窗口宽度 +X 且详情槽也 +X 时,网格拿到的宽度恒定。
+  handle('getDetailPanelRoom', () => detailMaxExtra());
+
+  /** 详情面板当前"已经向外扩出去"的宽度(渲染层逐帧对目标值,收起时归零) */
+  handle('getDetailPanelSpace', () => detailSpaceApplied);
+
   handle('pickImageFile', async () => {
     const r = await dialog.showOpenDialog(mainWindow ?? BrowserWindow.getAllWindows()[0], {
       title: '选择背景图片',
@@ -1983,6 +2087,18 @@ function registerIpc(): void {
       e.sender.startDrag({ file, icon });
     } catch {
       /* 拖出失败不影响窗口内部的"拖到分类"流程 */
+    }
+  });
+
+  /**
+   * 详情面板"向外延伸":渲染层按动画逐帧报告"要向外扩多少像素"。
+   * 用 send(fire-and-forget)而不是 handle:动画期间每帧都要发,等回复会把它拖成一顿一顿的。
+   */
+  ipcMain.on('detail-panel-space', (_e, px: unknown) => {
+    try {
+      applyDetailSpace(Number(px));
+    } catch {
+      /* 窗口正在关闭/销毁:忽略 */
     }
   });
 }

@@ -51,6 +51,7 @@ function createHttpApi(): ApiSurface {
     startScan: (rootIds, force) => http('POST', '/api/scan', { rootIds, force }),
     cancelScan: () => http<void>('POST', '/api/scan/cancel'),
     getScanProgress: () => http('GET', '/api/scan/progress'),
+    onDetailSpaceReset: () => () => {},
     onScanProgress: (cb) => {
       // 服务端用 SSE 推送(data: <ScanProgress JSON>),默认事件类型
       const es = new EventSource('/api/scan/events');
@@ -79,6 +80,10 @@ function createHttpApi(): ApiSurface {
     windowToggleMaximize: () => desktopOnly('最大化窗口'),
     windowClose: () => desktopOnly('关闭窗口'),
     isWindowMaximized: () => Promise.resolve(false),
+    // 浏览器调试版没有"窗口几何"这回事:永远没地方可扩 + 扩出去 0,面板走"向内挤压"
+    getDetailPanelRoom: () => Promise.resolve(0),
+    getDetailPanelSpace: () => Promise.resolve(0),
+    detailPanelSpace: () => {},
     getBackgroundUrl: () => Promise.resolve(null),
     getStats: (rootId) => http('GET', rootId ? `/api/stats?rootId=${rootId}` : '/api/stats'),
     getFilterOptions: () => http('GET', '/api/filters'),

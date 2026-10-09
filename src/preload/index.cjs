@@ -37,6 +37,11 @@ const api = {
     ipcRenderer.on('scan:progress', listener);
     return () => ipcRenderer.removeListener('scan:progress', listener);
   },
+  onDetailSpaceReset: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('detail:spaceReset', listener);
+    return () => ipcRenderer.removeListener('detail:spaceReset', listener);
+  },
 
   // ---- 浏览
   queryImages: (query) => call('queryImages', query),
@@ -64,6 +69,15 @@ const api = {
   windowToggleMaximize: () => call('windowToggleMaximize'),
   windowClose: () => call('windowClose'),
   isWindowMaximized: () => call('isWindowMaximized'),
+  /**
+   * 详情面板"向外延伸":以下两个是读,走 call;detailPanelSpace 是逐帧写,
+   * 必须 fire-and-forget(send)—— 等回复会把窗口伸缩动画拖成一顿一顿的。
+   */
+  getDetailPanelRoom: () => call('getDetailPanelRoom'),
+  getDetailPanelSpace: () => call('getDetailPanelSpace'),
+  detailPanelSpace: (px) => {
+    if (typeof px === 'number' && Number.isFinite(px)) ipcRenderer.send('detail-panel-space', px);
+  },
   getBackgroundUrl: () => call('getBackgroundUrl'),
   getStats: (rootId) => call('getStats', rootId),
   getFilterOptions: () => call('getFilterOptions'),

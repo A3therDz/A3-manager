@@ -134,8 +134,11 @@ if (!ifaceMatch) {
    *   recipeCoverUrl —— 纯前端拼接,不走 IPC(生成 cam-recipe://cover/<id>,由协议处理器服务封面)
    *   dragOutImages —— fire-and-forget 语义:preload 用 ipcRenderer.send('drag-out-images'),
    *                      主进程 ipcMain.on 里 webContents.startDrag 拖出原文件
+   *   onDetailSpaceReset —— 订阅语义:主进程在窗口最大化/全屏时推 detail:spaceReset
+   *   detailPanelSpace —— fire-and-forget 语义:preload 用 ipcRenderer.send('detail-panel-space'),
+   *                      渲染层逐帧报告"详情面板向外扩了多少",主进程改窗口宽度
    */
-  const NON_HANDLE = new Set(['onScanProgress', 'getThumbUrl', 'getPathForFile', 'onPetStateChanged', 'getFileUrl', 'recipeCoverUrl', 'dragOutImages']);
+  const NON_HANDLE = new Set(['onScanProgress', 'onDetailSpaceReset', 'getThumbUrl', 'getPathForFile', 'onPetStateChanged', 'getFileUrl', 'recipeCoverUrl', 'dragOutImages', 'detailPanelSpace']);
   const notInMain = apiMethods.filter((m) => !NON_HANDLE.has(m) && !channels.has(m));
   const extraChannels = [...channels].filter((c) => !apiMethods.includes(c));
 

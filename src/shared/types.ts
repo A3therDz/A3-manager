@@ -363,10 +363,12 @@ export interface AppSettings {
   /**
    * 点开图片时,右侧详情面板怎么出现。
    *   squeeze —— 向内挤压:面板占住布局槽(0 ↔ 520px 宽度过渡),网格跟着让位、逐帧重排;
-   *   overlay —— 向外延伸:面板从内容区右缘滑出(只动 transform)、浮在网格上,网格宽度不变、不重排。
-   * 老配置里没有这个字段 → 走默认(overlay,即向外延伸)。
+   *   extend  —— 向外延伸:**窗口自己向右扩出一块**(左边框钉住,面板放进去),
+   *              网格尺寸不变、也不会被面板盖住;屏幕右边没地方可扩(最大化/全屏)时
+   *              渲染层自动回落到"向内挤压"。
+   * 老配置里没有这个字段 → 走默认(extend,即向外延伸);老版本的 'overlay' 也归到这里。
    */
-  detailPanelMode: 'squeeze' | 'overlay';
+  detailPanelMode: 'squeeze' | 'extend';
   /**
    * 工作小窗(桌宠):开启后桌面上会有一个可拖动的小图标,
    * 点一下在图标上方弹出一个小工作窗,只上下翻动。
@@ -412,6 +414,11 @@ export interface ApiSurface {
   getScanProgress(): Promise<ScanProgress>;
   /** 订阅扫描进度推送。返回取消订阅函数 */
   onScanProgress(cb: (p: ScanProgress) => void): () => void;
+  /**
+   * 窗口被最大化 / 全屏(或退出)时,详情面板"向外延伸"占用的宽度会作废 ——
+   * 主进程推这一下,渲染层据此退回"向内挤压"布局并让窗口缩回去。
+   */
+  onDetailSpaceReset(cb: () => void): () => void;
 
   // 浏览
   queryImages(query: ImageQuery): Promise<ImageQueryResult>;
@@ -447,6 +454,18 @@ export interface ApiSurface {
   windowToggleMaximize(): Promise<void>;
   windowClose(): Promise<void>;
   isWindowMaximized(): Promise<boolean>;
+  /**
+   * 详情面板"向外延伸"用:窗口右边缘到当前显示器工作区右边缘还剩多少像素
+   * (最大化/全屏时为 0 —— 没地方可扩,渲染层改用"向内挤压")。
+   */
+  getDetailPanelRoom(): Promise<number>;
+  /** 已经向外扩出去的宽度(px);渲染层据此对齐动画的起点 */
+  getDetailPanelSpace(): Promise<number>;
+  /**
+   * 把"向外扩出去的宽度"设成 px(**fire-and-forget**:开/关面板时逐帧调用,
+   * 等回复会把动画拖成一顿一顿的;主进程只改窗口 width,x/y/height 不动)。
+   */
+  detailPanelSpace(px: number): void;
   /** 背景图的可直接加载 URL(带版本号,换图后自动失效缓存);没设背景返回 null */
   getBackgroundUrl(): Promise<string | null>;
   getStats(rootId?: number): Promise<LibraryStats>;
