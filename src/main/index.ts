@@ -581,7 +581,12 @@ function detailMaxExtra(): number {
   if (!wa) return 0;
   const roomRight = Math.max(0, wa.x + wa.width - (b.x + b.width));
   const roomLeft = Math.max(0, b.x - wa.x);
-  return Math.round(roomRight + roomLeft);
+  /**
+   * 已经扩出去的那部分也算"可扩量" —— 否则面板开着再问一次会得到 0
+   * (窗口此时正好贴着工作区右缘、也贴着左缘),调用方就会误判成"没地方可扩"而
+   * 把面板退回"向内挤压",表现为**切换图片时网格被挤一下又弹回来**。
+   */
+  return Math.round(detailSpaceApplied + roomRight + roomLeft);
 }
 
 let detailSpaceApplied = 0;

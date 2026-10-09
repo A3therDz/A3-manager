@@ -1781,20 +1781,15 @@ export function App() {
   const renderTarget = detailClosing ? frozenTargetRef.current : panelTarget;
 
   /**
-   * "向外延伸"的可行性要按每次打开重新评估:
-   *   - 主进程给的是"窗口右边缘到当前显示器工作区右边缘还剩多少"(最大化/全屏时为 0);
-   *   - 够 520px 才走向外延伸(窗口与槽位一起长宽,网格不变、不遮挡);
-   *   - 不够就退回"向内挤压"(网格让位),绝不会把面板伸到屏幕外。
-   * 用被打开的目标做依赖:换图/换目标时重算一次;面板关掉时归零(触发槽位卸载兜底缩窗)。
+   * "向外延伸"的可行性只在**面板从关到开**时评估一次(以及展开方式变化时),
+   * 不跟着"切换图片"重评估 —— 面板开着时窗口已经扩到贴着屏幕,
+   * 这时再去问"还能扩多少"会得到 0,判定就会翻回"向内挤压",
+   * 表现出来就是"点下一张图时网格被挤一下又弹回来"。
+   * 关掉面板时归零(窗口由槽位的卸载兜底缩回)。
    */
-  const detailTargetKey =
-    panelTarget?.kind === 'indexed'
-      ? 'id:' + String(panelTarget.detail?.id ?? '')
-      : panelTarget?.kind === 'dropped'
-        ? 'file:' + panelTarget.info.path
-        : '';
+  const detailOpen = renderTarget !== null;
   useEffect(() => {
-    if (!detailTargetKey || detailMode !== 'extend') {
+    if (!detailOpen || detailMode !== 'extend') {
       setDetailExtend(false);
       return;
     }
@@ -1803,8 +1798,7 @@ export function App() {
       .getDetailPanelRoom()
       .then((room) => {
         // 可扩量够整个面板 → 网格一点不动;够一部分(≥200px)→ 扩多少算多少、
-        // 余下的由网格让位(比"整块 520 都挤网格"好得多);几乎没有空间(最大化/全屏)
-        // 才退回完整的"向内挤压"。
+        // 余下的由网格让位;几乎没有空间(最大化/全屏)才退回完整的"向内挤压"。
         if (!cancelled) setDetailExtend(Number(room) >= DETAIL_EXTEND_MIN);
       })
       .catch(() => {
@@ -1813,7 +1807,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [detailTargetKey, detailMode]);
+  }, [detailOpen, detailMode]);
 
   /** 窗口被最大化 / 全屏:主进程作废"向外扩"的几何,这里退回挤压布局(窗口也会缩回去) */
   useEffect(() => {

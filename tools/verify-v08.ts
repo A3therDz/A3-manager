@@ -1097,6 +1097,11 @@ console.log('\n--- G) 详情面板展开方式:向内挤压 / 向外延伸(设�
   mustHave('src/renderer/App.tsx', 'tell(0)', '卸载时兜底把窗口缩回去');
   mustHave('src/renderer/App.tsx', 'getDetailPanelRoom()', '打开前先问"屏幕右边还有多少地方可扩"');
   mustHave('src/renderer/App.tsx', '>= DETAIL_EXTEND_MIN', '可扩量太少(最大化/全屏)才退回"向内挤压"');
+  // 回归:切换图片时**不能**重新评估可扩空间 —— 面板开着时窗口已贴着屏幕,再问会得到 0,
+  // 判定翻回"向内挤压",表现为"点下一张图网格被挤一下又弹回来"
+  mustHave('src/renderer/App.tsx', '}, [detailOpen, detailMode]);', '只在"面板开/关 + 展开方式变化"时评估(不跟切换图片走)');
+  mustNotHave('src/renderer/App.tsx', 'detailTargetKey', '不再用"当前图片"做评估依赖');
+  mustHave('src/main/index.ts', 'return Math.round(detailSpaceApplied + roomRight + roomLeft);', '已扩出去的部分也算可扩量(开着面板再问不会得到 0)');
   mustHave('src/renderer/App.tsx', 'DETAIL_EXTEND_MIN = 200', '可扩量下限是个明确常量(够一部分时按"能扩多少扩多少")');
   mustHave('src/renderer/App.tsx', '窗口可以左移的距离', '够不够是按"右边剩余 + 可左移距离"算的');
   const jswidth = ruleBlock(read('src/renderer/main.tsx'), '.cam-detail-slot.jswidth');
